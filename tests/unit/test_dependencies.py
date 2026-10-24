@@ -391,3 +391,29 @@ def test_normalize_pypi_name_follows_pep503() -> None:
 )
 def test_npm_spec_satisfied(version: str, specifier: str, expected: bool | None) -> None:
     assert npm_spec_satisfied(version, specifier) is expected
+
+
+def test_recursion_error_in_json_parsing_is_handled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr("repolens.dependencies.json.loads", _boom)
+    context = _context(
+        tmp_path,
+        {
+            "package.json": json.dumps({"dependencies": {"react": "^18.0.0"}}),
+            "package-lock.json": json.dumps({"lockfileVersion": 3, "packages": {}}),
+            "Pipfile.lock": json.dumps({"default": {}}),
+        },
+    )
+    inventory = build_dependency_inventory(context)
+
+    assert inventory.declared == ()
+    malformed = {
+        problem.path
+        for problem in inventory.problems
+        if problem.kind is DependencyProblemKind.MALFORMED_LOCKFILE
+    }
+    assert malformed == {"package-lock.json", "Pipfile.lock"}

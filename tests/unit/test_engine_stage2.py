@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from repolens.analyzers.base import Analyzer, AnalyzerAvailability
 from repolens.analyzers.structure import StructureAnalyzer
 from repolens.config import ScanConfig
@@ -122,3 +124,19 @@ def test_gitignore_excluding_test_directory_is_reported(
     assert finding.severity.value == "low"
     assert "tests" in (finding.evidence or "")
     assert "package-lock.json" in (finding.evidence or "")
+
+
+def test_structure_analyzer_handles_recursion_error_in_package_json(
+    make_jsts_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_jsts_repo()
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr("repolens.analyzers.structure.json.loads", _boom)
+    report = ScanEngine(analyzers=[StructureAnalyzer()]).scan(repo)
+
+    finding = next(item for item in report.findings if item.rule_id == "RL-STRUCT-011")
+    assert "too deeply nested" in (finding.evidence or "")
+    assert report.analyzer_outcomes[0].status == AnalyzerStatus.COMPLETED
