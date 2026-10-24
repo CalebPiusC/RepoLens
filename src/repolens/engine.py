@@ -8,7 +8,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from repolens import __version__
-from repolens.analyzers import Analyzer, AnalyzerTimeoutError, default_analyzers
+from repolens.analyzers import (
+    Analyzer,
+    AnalyzerTimeoutError,
+    AnalyzerUnavailableError,
+    default_analyzers,
+)
 from repolens.config import ScanConfig
 from repolens.discovery import discover_repository
 from repolens.models import AnalyzerOutcome, AnalyzerStatus, Finding, ScanReport
@@ -68,7 +73,25 @@ class ScanEngine:
         outcomes: list[AnalyzerOutcome] = []
 
         for analyzer in self.analyzers:
-            if not analyzer.is_applicable(context):
+            # Applicability and availability probing are isolated so a misbehaving
+            # analyzer cannot abort the whole scan before it even runs.
+            try:
+                applicable = analyzer.is_applicable(context)
+                skip_reason = analyzer.skip_reason(context, self.config) if applicable else None
+                availability = analyzer.check_availability() if applicable else None
+            except Exception as exc:
+                if self.config.fail_fast:
+                    raise
+                outcomes.append(
+                    AnalyzerOutcome(
+                        analyzer_name=_safe_analyzer_name(analyzer),
+                        status=AnalyzerStatus.FAILED,
+                        message=f"{type(exc).__name__}: {exc}",
+                    )
+                )
+                continue
+
+            if not applicable:
                 outcomes.append(
                     AnalyzerOutcome(
                         analyzer_name=analyzer.name,
@@ -78,8 +101,17 @@ class ScanEngine:
                 )
                 continue
 
-            availability = analyzer.check_availability()
-            if not availability.available:
+            if skip_reason is not None:
+                outcomes.append(
+                    AnalyzerOutcome(
+                        analyzer_name=analyzer.name,
+                        status=AnalyzerStatus.SKIPPED,
+                        message=skip_reason,
+                    )
+                )
+                continue
+
+            if availability is not None and not availability.available:
                 outcomes.append(
                     AnalyzerOutcome(
                         analyzer_name=analyzer.name,
@@ -100,6 +132,16 @@ class ScanEngine:
                         status=AnalyzerStatus.TIMED_OUT,
                         duration_ms=analyzer_duration,
                         message=str(exc) or "Analyzer timed out.",
+                    )
+                )
+            except AnalyzerUnavailableError as exc:
+                analyzer_duration = (time.perf_counter() - analyzer_start) * 1000.0
+                outcomes.append(
+                    AnalyzerOutcome(
+                        analyzer_name=analyzer.name,
+                        status=AnalyzerStatus.UNAVAILABLE,
+                        duration_ms=analyzer_duration,
+                        message=str(exc) or "Required analyzer dependency became unavailable.",
                     )
                 )
             except Exception as exc:
@@ -123,6 +165,7 @@ class ScanEngine:
                         status=AnalyzerStatus.COMPLETED,
                         findings_count=len(analyzer_findings),
                         duration_ms=analyzer_duration,
+                        message=analyzer.completion_message(),
                     )
                 )
 
@@ -138,3 +181,11 @@ class ScanEngine:
             analyzer_outcomes=outcomes,
             findings=ordered_findings,
         )
+
+
+def _safe_analyzer_name(analyzer: Analyzer) -> str:
+    """Best-effort analyzer name for outcomes when ``analyzer.name`` itself is broken."""
+    try:
+        return analyzer.name
+    except Exception:  # pragma: no cover - defensive only
+        return type(analyzer).__name__

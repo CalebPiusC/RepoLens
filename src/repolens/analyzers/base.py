@@ -23,6 +23,14 @@ class AnalyzerTimeoutError(RuntimeError):
     """Raised by an analyzer when its underlying tool exceeds its time budget."""
 
 
+class AnalyzerUnavailableError(RuntimeError):
+    """Raised when a required external tool or service disappears mid-scan."""
+
+
+class AnalyzerExecutionError(RuntimeError):
+    """Raised when an external tool fails, crashes, or emits unusable output."""
+
+
 class Analyzer(ABC):
     """Minimal contract implemented by all built-in and external tool analyzers."""
 
@@ -35,9 +43,21 @@ class Analyzer(ABC):
         """Return True if this analyzer applies to the discovered repository."""
         return True
 
+    def skip_reason(self, context: RepositoryContext, config: ScanConfig) -> str | None:
+        """Return a human-readable reason to skip this analyzer, or None to run it.
+
+        Used to distinguish a deliberate skip (for example optional network checks that
+        the caller did not opt into) from a missing runtime dependency.
+        """
+        return None
+
     def check_availability(self) -> AnalyzerAvailability:
         """Check if external binaries or optional packages required by this analyzer exist."""
         return AnalyzerAvailability(available=True)
+
+    def completion_message(self) -> str | None:
+        """Return optional telemetry to record when the analyzer completes successfully."""
+        return None
 
     @abstractmethod
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:

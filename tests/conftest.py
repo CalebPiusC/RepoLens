@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import os
+import stat
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+
+from repolens.analyzers.tooling import clear_tool_cache
+
+
+@pytest.fixture(autouse=True)
+def _clear_tool_availability_cache() -> Iterator[None]:
+    """Prevent cached external-tool probes from leaking between tests."""
+    clear_tool_cache()
+    yield
+    clear_tool_cache()
 
 
 @pytest.fixture
@@ -19,6 +31,7 @@ def make_python_repo(tmp_path: Path) -> Callable[..., Path]:
         include_readme: bool = True,
         include_gitignore: bool = True,
         include_pyproject: bool = True,
+        include_tests: bool = True,
     ) -> Path:
         root = tmp_path / name
         root.mkdir(parents=True, exist_ok=True)
@@ -29,8 +42,7 @@ def make_python_repo(tmp_path: Path) -> Callable[..., Path]:
             )
         if include_readme:
             (root / "README.md").write_text(
-                "# Sample Python Repo\n\nA healthy test repository.\n",
-                encoding="utf-8",
+                "# Sample Python Repo\n\nA healthy test repository.\n", encoding="utf-8"
             )
         if include_gitignore:
             (root / ".gitignore").write_text(
@@ -39,7 +51,8 @@ def make_python_repo(tmp_path: Path) -> Callable[..., Path]:
             )
         if include_pyproject:
             (root / "pyproject.toml").write_text(
-                '[project]\nname = "sample"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n',
+                '[project]\nname = "sample"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n'
+                '\n[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
                 encoding="utf-8",
             )
 
@@ -50,6 +63,15 @@ def make_python_repo(tmp_path: Path) -> Callable[..., Path]:
             "def add(a: int, b: int) -> int:\n    return a + b\n",
             encoding="utf-8",
         )
+
+        if include_tests:
+            tests_dir = root / "tests"
+            tests_dir.mkdir(parents=True, exist_ok=True)
+            (tests_dir / "test_core.py").write_text(
+                "from sample.core import add\n\n\n"
+                "def test_add() -> None:\n    assert add(1, 2) == 3\n",
+                encoding="utf-8",
+            )
         return root
 
     return _create
@@ -64,6 +86,7 @@ def make_jsts_repo(tmp_path: Path) -> Callable[..., Path]:
         *,
         include_gitignore: bool = True,
         include_lockfile: bool = True,
+        include_tests: bool = True,
     ) -> Path:
         root = tmp_path / name
         root.mkdir(parents=True, exist_ok=True)
@@ -76,13 +99,13 @@ def make_jsts_repo(tmp_path: Path) -> Callable[..., Path]:
             (root / ".gitignore").write_text("node_modules/\ndist/\n.env\n", encoding="utf-8")
 
         (root / "package.json").write_text(
-            '{\n  "name": "sample-ts",\n  "version": "1.0.0",\n'
-            '  "devDependencies": {\n    "typescript": "^5.6.0"\n  }\n}\n',
+            '{\n  "name": "sample-ts",\n  "version": "1.0.0",\n  "license": "MIT",\n'
+            '  "scripts": {\n    "test": "vitest run"\n  },\n'
+            '  "devDependencies": {\n    "typescript": "^5.6.0",\n    "vitest": "^2.1.0"\n  }\n}\n',
             encoding="utf-8",
         )
         (root / "tsconfig.json").write_text(
-            '{\n  "compilerOptions": {\n    "strict": true\n  }\n}\n',
-            encoding="utf-8",
+            '{\n  "compilerOptions": {\n    "strict": true\n  }\n}\n', encoding="utf-8"
         )
         if include_lockfile:
             (root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
@@ -93,6 +116,37 @@ def make_jsts_repo(tmp_path: Path) -> Callable[..., Path]:
             "export const greet = (name: string): string => `Hello, ${name}`;\n",
             encoding="utf-8",
         )
+        if include_tests:
+            (src / "index.test.ts").write_text(
+                'import { describe, expect, it } from "vitest";\n'
+                'import { greet } from "./index";\n\n'
+                'describe("greet", () => {\n'
+                '  it("greets", () => {\n    expect(greet("x")).toBe("Hello, x");\n  });\n});\n',
+                encoding="utf-8",
+            )
         return root
 
     return _create
+
+
+@pytest.fixture
+def install_fake_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Path]:
+    """Install a stub executable on a temporary PATH and invalidate probe caches.
+
+    The stub lets tests exercise the real subprocess execution path without requiring
+    Ruff, Bandit, or Biome to be installed on the test machine.
+    """
+
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    def _install(name: str, script: str) -> Path:
+        path = bin_dir / name
+        path.write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        current = os.environ.get("PATH", "")
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{current}")
+        clear_tool_cache()
+        return path
+
+    return _install

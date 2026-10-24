@@ -139,5 +139,16 @@ def test_repolens_repository_passes_self_scan() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     report = ScanEngine().scan(repo_root)
 
-    assert all(o.status == AnalyzerStatus.COMPLETED for o in report.analyzer_outcomes)
-    assert report.findings == [], f"Self-scan reported unexpected findings: {report.findings}"
+    # External tools (Ruff/Bandit/Biome) and opt-in network checks may legitimately be
+    # unavailable on a contributor machine; nothing may fail outright.
+    assert {o.status for o in report.analyzer_outcomes} <= {
+        AnalyzerStatus.COMPLETED,
+        AnalyzerStatus.SKIPPED,
+        AnalyzerStatus.UNAVAILABLE,
+    }
+    assert not report.has_findings_at_or_above(Severity.LOW), (
+        f"Self-scan reported unexpected findings: {report.findings}"
+    )
+    # The only tolerated advisory is the documented informational lockfile note for a
+    # library that intentionally does not commit a Python lockfile.
+    assert {f.rule_id for f in report.findings} <= {"RL-DEP-005"}

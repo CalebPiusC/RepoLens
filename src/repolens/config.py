@@ -60,3 +60,16 @@ class ScanConfig(BaseModel):
     excluded_dirs: frozenset[str] = Field(default=DEFAULT_EXCLUDED_DIRS)
     reject_symlink_root: bool = True
     fail_fast: bool = False
+
+    # External static-analysis tool budgets (Stage 2).
+    enable_external_tools: bool = True
+    max_tool_files: int = Field(default=2_000, ge=1, le=50_000)
+    tool_batch_size: int = Field(default=200, ge=1, le=1_000)
+    max_findings_per_analyzer: int = Field(default=200, ge=1, le=5_000)
+
+    # Optional network dependency-vulnerability checks (OSV.dev). Disabled by default.
+    enable_network_checks: bool = False
+    network_timeout_seconds: float = Field(default=10.0, gt=0.5, le=60.0)
+    max_network_response_bytes: int = Field(default=2_097_152, ge=4_096, le=16_777_216)
+    max_osv_packages: int = Field(default=300, ge=1, le=2_000)
+    max_osv_advisories: int = Field(default=50, ge=1, le=500)
