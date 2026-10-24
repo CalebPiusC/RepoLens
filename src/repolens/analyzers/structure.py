@@ -61,6 +61,18 @@ _JS_LOCKFILES: dict[str, str] = {
     "bun.lock": "bun",
 }
 
+_COMMIT_CRITICAL_LOCKFILES: frozenset[str] = frozenset(
+    {
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "poetry.lock",
+        "uv.lock",
+        "Pipfile.lock",
+    }
+)
+
 _CRITICAL_KEY_EXTENSIONS: frozenset[str] = frozenset(
     {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx"}
 )
@@ -104,6 +116,7 @@ class StructureAnalyzer(Analyzer):
         findings.extend(self._check_license(context))
         findings.extend(self._check_readme(context))
         findings.extend(self._check_gitignore(context))
+        findings.extend(self._check_gitignore_quality(context))
         findings.extend(self._check_sensitive_files(context))
         findings.extend(self._check_artifact_directories(context))
         findings.extend(self._check_manifests_and_lockfiles(context))
@@ -278,6 +291,43 @@ class StructureAnalyzer(Analyzer):
             )
 
         return findings
+
+    def _check_gitignore_quality(self, context: RepositoryContext) -> list[Finding]:
+        """Flag ignore rules that would exclude files which must be committed."""
+        if not context.has_gitignore:
+            return []
+
+        ignored_lockfiles = [
+            name for name in _COMMIT_CRITICAL_LOCKFILES if context.gitignore.is_ignored(name)
+        ]
+        ignored_test_dirs = [
+            name for name in ("tests", "test") if context.gitignore.is_ignored(name, is_dir=True)
+        ]
+        if not ignored_lockfiles and not ignored_test_dirs:
+            return []
+
+        affected = ", ".join(sorted([*ignored_lockfiles, *ignored_test_dirs]))
+        return [
+            Finding(
+                rule_id="RL-STRUCT-012",
+                category=Category.STRUCTURE,
+                severity=Severity.LOW,
+                confidence=Confidence.HIGH,
+                title=".gitignore excludes files that should be committed",
+                location=FindingLocation(path=".gitignore"),
+                evidence=f".gitignore matches: {affected}",
+                explanation=(
+                    "Ignoring lockfiles or test directories makes installs non-reproducible and "
+                    "hides the test suite from clones and CI."
+                ),
+                recommendation=(
+                    "Remove the ignore rules for lockfiles and test directories; keep "
+                    "environment-specific artifacts ignored instead."
+                ),
+                verification="Run `git check-ignore <path>` and confirm the file is trackable.",
+                source=_SOURCE,
+            )
+        ]
 
     def _check_sensitive_files(self, context: RepositoryContext) -> list[Finding]:
         findings: list[Finding] = []
@@ -467,7 +517,13 @@ class StructureAnalyzer(Analyzer):
         raw = context.read_text(item.path)
         try:
             parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
+            if isinstance(exc, json.JSONDecodeError):
+                detail = f"JSONDecodeError at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+                start_line = max(exc.lineno, 1)
+            else:
+                detail = "package.json is too deeply nested to parse safely."
+                start_line = 1
             return [
                 Finding(
                     rule_id="RL-STRUCT-011",
@@ -475,8 +531,8 @@ class StructureAnalyzer(Analyzer):
                     severity=Severity.HIGH,
                     confidence=Confidence.HIGH,
                     title="Malformed package.json manifest",
-                    location=FindingLocation(path=item.path, start_line=max(exc.lineno, 1)),
-                    evidence=f"JSONDecodeError at line {exc.lineno}, column {exc.colno}: {exc.msg}",
+                    location=FindingLocation(path=item.path, start_line=start_line),
+                    evidence=detail,
                     explanation=(
                         "Invalid JSON in package.json prevents npm, pnpm, yarn, and Biome from "
                         "parsing project configuration and dependencies."
