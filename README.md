@@ -5,9 +5,9 @@ An open-source repository health checker for Python and JavaScript/TypeScript pr
 
 RepoLens helps developers identify, understand, and fix repository hygiene, configuration, code quality, dependency, and security issues before publishing or deploying a project.
 
-## Current Status — Stage 2 (Static Analysis)
+## Current Status — Stage 3 (Command-Line Interface)
 
-RepoLens is built in incremental stages. Stages 1 and 2 are complete:
+RepoLens is built in incremental stages. Stages 1, 2 and 3 are complete:
 
 **Stage 1 — foundation and shared engine**
 
@@ -25,11 +25,18 @@ RepoLens is built in incremental stages. Stages 1 and 2 are complete:
 - **Documentation and testing hygiene** checks (README/license cross-references, test presence, runner/coverage configuration).
 - **Fault-isolated analyzer lifecycle** distinguishing completed, skipped, unavailable, timed-out, and failed checks.
 
+**Stage 3 — command-line interface**
+
+- **`repolens` executable** (`repolens.cli`) configured through `[project.scripts]`, with `repolens --help`, `repolens --version`, and `repolens scan [PATH]`.
+- **Terminal reporter** (`repolens.reporting`) showing findings by severity with rule ID, location, message, a per-analyzer status table, severity counts, and an overall result.
+- **Documented exit-code policy** that distinguishes clean scans, detected findings, invalid input, operational failures, and interrupts.
+- **No new dependencies:** the CLI is built on the Python standard library (`argparse`).
+
 ### Roadmap
 
 - **Stage 1 (Complete):** Project foundation, shared analysis engine, structure analyzer, and test suite.
 - **Stage 2 (Complete):** Python (`Ruff`, `Bandit`) and JavaScript/TypeScript (`Biome`) analyzer adapters, manifest/lockfile and OSV dependency checks, documentation and static test checks.
-- **Stage 3:** Command-line interface (`repolens scan`) and Terminal, JSON, and Markdown reporters.
+- **Stage 3 (Complete):** Command-line interface (`repolens scan`) and terminal reporter. JSON and Markdown reporters remain future work.
 - **Stage 4:** Strict opt-in Gemini advisory explanations.
 - **Stage 5:** FastAPI + HTML/HTMX web interface for GitHub archive and ZIP scanning.
 - **Stage 6:** Container isolation hardening, and public beta.
@@ -40,13 +47,125 @@ RepoLens is built in incremental stages. Stages 1 and 2 are complete:
 
 RepoLens itself has no runtime requirement on Ruff, Bandit, Biome, Node.js, or network access. External tools and OSV.dev are strictly optional.
 
-## Development Setup
+## Installation
+
+RepoLens requires Python `>= 3.11`.
 
 ```bash
+git clone https://github.com/CalebPiusC/RepoLens.git
+cd RepoLens
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+
+pip install .              # installs RepoLens and the `repolens` command
+pip install -e ".[dev]"    # editable install with lint/test tooling
 ```
+
+RepoLens is not yet published to PyPI; install it from the repository (add `.[tools]` to pull
+in Ruff and Bandit). Every invocation can also be run without the console script via
+`python -m repolens`.
+
+## Command-Line Usage
+
+```bash
+$ repolens --version
+repolens 0.1.0
+
+$ repolens --help            # top-level help, commands, and exit codes
+$ repolens scan --help       # scan options and examples
+```
+
+### Scanning a project
+
+```bash
+repolens scan .              # scan the current directory
+repolens scan ../my-service  # scan a specific project directory
+```
+
+Example output (colors omitted):
+
+```text
+RepoLens 0.1.0 · my-service
+Target: ../my-service
+Scanned 412 file(s) · 3.4 MiB · in 812 ms · languages: python, typescript
+
+Findings — 2 at or above 'info' severity
+  SEVERITY  RULE           LOCATION            MESSAGE
+  MEDIUM    RL-STRUCT-001  -                   Missing repository LICENSE file
+  LOW       RL-DOC-003     README.md:12        README links to a missing path: docs/guide.md
+
+Analyzers
+  STATUS     ANALYZER                   DETAIL
+  completed  repolens-structure         1 finding(s) in 4 ms
+  ...        ...                        ...
+
+Summary
+  critical 0 · high 0 · medium 1 · low 1 · info 0
+  Result: 2 finding(s) detected at or above 'info' severity (exit code 1)
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `PATH` | Directory to scan. Defaults to `.`. Missing paths, regular files, and symlinked roots are rejected before any analyzer runs. |
+| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity are listed as actionable and affect the exit code. All severities are still counted in the summary. Default: `info`. |
+| `--max-findings N` | Maximum number of findings printed, `1`-`10000`. Default: `50`. Truncated output is announced. |
+| `--network-checks` | Enable the optional OSV.dev known-vulnerability lookups (requires network). Disabled by default. |
+| `--color {auto,always,never}` | Terminal coloring. `auto` colors only when stdout is a TTY and `NO_COLOR` is unset. Default: `auto`. |
+| `--version` / `--help` | Print version or help and exit `0`. |
+
+Use `--min-severity` to make CI gate on meaningful issues only:
+
+```bash
+repolens scan . --min-severity high   # a repository with only medium issues exits 0
+```
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Scan completed; no finding met the `--min-severity` threshold. |
+| `1` | Scan completed; at least one finding met the threshold. |
+| `2` | Invalid arguments or unusable target path. Nothing was scanned. |
+| `3` | Scan could not be completed: an analyzer failed or timed out, or an internal error occurred. |
+| `130` | Scan interrupted (Ctrl-C). |
+
+Notes on the policy:
+
+- `1` takes precedence over `3`: detected findings are reported even when another analyzer
+  failed.
+- A scan with a failed or timed-out analyzer never exits `0`, so an incomplete scan is never
+  mistaken for a clean one.
+- Analyzers marked `unavailable` (optional tools such as Ruff, Bandit, or Biome not installed)
+  are reported in the output but do not change the exit code, so CI is not broken by missing
+  optional tooling. Install `repolens[tools]` and Biome to close those gaps.
+- Discovery truncation (file/byte limits) prints a warning; findings still decide the exit code.
+
+Typical CI usage:
+
+```bash
+pip install ".[tools]"          # or: pip install ruff bandit
+repolens scan . --min-severity medium
+```
+
+The command's own exit status is the CI result: `0` clean, `1` findings, `2`/`3`/`130` are
+errors that must fail the build as well.
+
+### Error handling
+
+Invalid paths and operational failures are printed to **stderr** as single-line messages
+without stack traces, for example:
+
+```text
+$ repolens scan /does/not/exist
+repolens: error: Repository path does not exist: /does/not/exist
+$ echo $?
+2
+```
+
+Unexpected internal errors are reported with the exception type and a scrubbed message plus a
+link to the issue tracker; secrets are redacted before anything is printed.
 
 ## Optional external tools
 
@@ -180,6 +299,16 @@ for finding in report.findings:
     print(f"[{finding.severity.upper()}] {finding.rule_id}: {finding.title}")
 ```
 
+The CLI is a thin front end over exactly this API: `repolens.cli` builds a `ScanConfig`,
+calls `ScanEngine.scan()`, and renders the resulting `ScanReport` with
+`repolens.reporting.render_report()`. To render a report you already have:
+
+```python
+from repolens.reporting import RenderOptions, render_report
+
+print(render_report(report, options=RenderOptions(color=False)))
+```
+
 ## Running Tests & Quality Checks
 
 ```bash
@@ -188,6 +317,9 @@ ruff check src tests
 ruff format --check src tests
 mypy src tests
 ```
+
+The suite includes CLI tests that drive `main()` with a fake engine and packaging tests that
+invoke the installed entry point in a subprocess.
 
 The default test suite does not require network access and does not require Ruff, Bandit, or Biome to be installed: external tools are exercised through stub executables placed on a temporary `PATH`, and OSV.dev is replaced with an in-memory transport. Tests marked `network` exist only as documentation of that boundary and never call live services.
 

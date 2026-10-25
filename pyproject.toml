@@ -40,6 +40,9 @@ dependencies = [
     "pydantic>=2.7,<3.0",
 ]
 
+[project.scripts]
+repolens = "repolens.cli:main"
+
 [project.optional-dependencies]
 # Optional external static-analysis tools. RepoLens never installs these automatically.
 tools = [

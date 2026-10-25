@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import os
 import stat
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from repolens.analyzers.tooling import clear_tool_cache
+from repolens.models import (
+    AnalyzerOutcome,
+    AnalyzerStatus,
+    Category,
+    DiscoverySummary,
+    Finding,
+    FindingLocation,
+    FindingSource,
+    ScanReport,
+    Severity,
+    SourceKind,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -150,3 +163,80 @@ def install_fake_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callab
         return path
 
     return _install
+
+
+@pytest.fixture
+def make_finding() -> Callable[..., Finding]:
+    """Build a deterministic ``Finding`` for report/CLI tests."""
+
+    def _create(
+        *,
+        rule_id: str = "RL-STRUCT-001",
+        severity: Severity = Severity.MEDIUM,
+        category: Category = Category.STRUCTURE,
+        title: str = "Missing repository LICENSE file",
+        path: str | None = "LICENSE",
+        start_line: int | None = None,
+        tool: str = "repolens-structure",
+        explanation: str = "An explicit license is required for others to use the code.",
+        recommendation: str = "Add a LICENSE file at the repository root.",
+    ) -> Finding:
+        return Finding(
+            rule_id=rule_id,
+            category=category,
+            severity=severity,
+            title=title,
+            location=(None if path is None else FindingLocation(path=path, start_line=start_line)),
+            explanation=explanation,
+            recommendation=recommendation,
+            verification="Confirm the file exists at the repository root.",
+            source=FindingSource(kind=SourceKind.DETERMINISTIC, tool=tool, tool_version="0.1.0"),
+        )
+
+    return _create
+
+
+@pytest.fixture
+def make_scan_report() -> Callable[..., ScanReport]:
+    """Build a ``ScanReport`` without running any analyzer."""
+
+    def _create(
+        *,
+        findings: Sequence[Finding] = (),
+        outcomes: Sequence[AnalyzerOutcome] | None = None,
+        repository_name: str = "sample-repo",
+        truncated_by_file_limit: bool = False,
+        truncated_by_byte_limit: bool = False,
+        total_files: int = 5,
+    ) -> ScanReport:
+        analyzer_outcomes: list[AnalyzerOutcome] = list(outcomes) if outcomes is not None else []
+        if outcomes is None:
+            analyzer_outcomes = [
+                AnalyzerOutcome(
+                    analyzer_name="repolens-structure",
+                    status=AnalyzerStatus.COMPLETED,
+                    findings_count=len(findings),
+                    duration_ms=3.0,
+                )
+            ]
+        return ScanReport(
+            repolens_version="0.1.0",
+            repository_name=repository_name,
+            scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+            duration_ms=12.5,
+            discovery=DiscoverySummary(
+                total_files_scanned=total_files,
+                total_bytes_scanned=2048,
+                skipped_excluded_count=0,
+                skipped_symlink_count=0,
+                skipped_oversized_count=0,
+                sensitive_files_detected=0,
+                truncated_by_file_limit=truncated_by_file_limit,
+                truncated_by_byte_limit=truncated_by_byte_limit,
+                detected_languages=[],
+            ),
+            analyzer_outcomes=analyzer_outcomes,
+            findings=list(findings),
+        )
+
+    return _create
