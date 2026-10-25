@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 
 from repolens.config import HYGIENE_TRACKED_ARTIFACT_DIRS, ScanConfig
 from repolens.exceptions import (
+    DiscoveryAbortedError,
     DiscoveryError,
     OversizedFileAccessError,
     PathSecurityError,
@@ -389,6 +390,8 @@ def discover_repository(repo_path: Path, config: ScanConfig | None = None) -> Re
     sensitive_files_detected = 0
     truncated_by_file_limit = False
     truncated_by_byte_limit = False
+    unreadable_directory_count = 0
+    unreadable_entry_count = 0
 
     # Iterative DFS stack: (directory_path, relative_posix_prefix, depth)
     stack: list[tuple[Path, str, int]] = [(canonical_root, "", 0)]
@@ -399,6 +402,10 @@ def discover_repository(repo_path: Path, config: ScanConfig | None = None) -> Re
             with os.scandir(current_dir) as it:
                 entries = sorted(it, key=lambda e: e.name)
         except OSError:
+            # The directory exists in the walk but its contents are invisible to us, so
+            # anything inside it goes unchecked. Record it: a scan that could not look
+            # everywhere must never be reported as clean.
+            unreadable_directory_count += 1
             continue
 
         subdirs_to_push: list[tuple[Path, str, int]] = []
@@ -419,7 +426,7 @@ def discover_repository(repo_path: Path, config: ScanConfig | None = None) -> Re
                 entry_path = Path(entry.path)
                 resolved_entry = entry_path.resolve()
                 if not resolved_entry.is_relative_to(canonical_root):
-                    raise PathSecurityError(f"Entry escaped canonical root: {rel_posix}")
+                    raise DiscoveryAbortedError(f"Entry escaped canonical root: {rel_posix}")
 
                 if entry.is_dir(follow_symlinks=False):
                     if name in active_config.excluded_dirs:
@@ -438,6 +445,9 @@ def discover_repository(repo_path: Path, config: ScanConfig | None = None) -> Re
             except PathSecurityError:
                 raise
             except OSError:
+                # A single unreadable/undecidable entry: skip it but keep it visible in
+                # the summary so it cannot masquerade as a clean scan.
+                unreadable_entry_count += 1
                 continue
 
             if len(discovered_files) >= active_config.max_files:
@@ -493,6 +503,8 @@ def discover_repository(repo_path: Path, config: ScanConfig | None = None) -> Re
         sensitive_files_detected=sensitive_files_detected,
         truncated_by_file_limit=truncated_by_file_limit,
         truncated_by_byte_limit=truncated_by_byte_limit,
+        unreadable_directory_count=unreadable_directory_count,
+        unreadable_entry_count=unreadable_entry_count,
         detected_languages=detected_languages,
     )
 

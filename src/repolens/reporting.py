@@ -82,8 +82,11 @@ class ScanVerdict:
     threshold: Severity
     total_findings: int
     findings_at_or_above: tuple[Finding, ...]
+    severity_counts: dict[Severity, int]
     incomplete_analyzers: tuple[AnalyzerOutcome, ...]
     unavailable_analyzers: tuple[AnalyzerOutcome, ...]
+    discovery_failures: int = 0
+    discovery_truncated: bool = False
 
     @property
     def has_findings(self) -> bool:
@@ -96,9 +99,14 @@ class ScanVerdict:
         return self.total_findings - len(self.findings_at_or_above)
 
     @property
+    def discovery_incomplete(self) -> bool:
+        """True when discovery could not see the whole repository."""
+        return self.discovery_failures > 0 or self.discovery_truncated
+
+    @property
     def is_incomplete(self) -> bool:
-        """True when an analyzer failed or timed out, so coverage is incomplete."""
-        return bool(self.incomplete_analyzers)
+        """True when coverage is incomplete, whether from analyzers or discovery."""
+        return bool(self.incomplete_analyzers) or self.discovery_incomplete
 
     @property
     def is_clean(self) -> bool:
@@ -108,11 +116,22 @@ class ScanVerdict:
 
 def evaluate(report: ScanReport, min_severity: Severity = Severity.INFO) -> ScanVerdict:
     """Compute the exit-relevant verdict for ``report`` at ``min_severity``."""
+    severity_counts = dict.fromkeys(_SEVERITY_ORDER, 0)
+    for finding in report.findings:
+        severity_counts[finding.severity] += 1
+
     return ScanVerdict(
         threshold=min_severity,
         total_findings=len(report.findings),
         findings_at_or_above=tuple(
             finding for finding in report.findings if finding.severity.rank >= min_severity.rank
+        ),
+        severity_counts=severity_counts,
+        discovery_failures=(
+            report.discovery.unreadable_directory_count + report.discovery.unreadable_entry_count
+        ),
+        discovery_truncated=(
+            report.discovery.truncated_by_file_limit or report.discovery.truncated_by_byte_limit
         ),
         incomplete_analyzers=tuple(
             outcome
@@ -284,13 +303,12 @@ def _render_analyzers(report: ScanReport, paint: _Painter) -> list[str]:
 def _render_summary(
     verdict: ScanVerdict, opts: RenderOptions, paint: _Painter, exit_code: int | None
 ) -> list[str]:
-    counts = dict.fromkeys(_SEVERITY_ORDER, 0)
-    for finding in verdict.findings_at_or_above:
-        counts[finding.severity] += 1
-
+    # Counts cover every finding, not just those above the threshold: the summary
+    # describes the report, while the threshold only decides which findings gate the
+    # exit code (stated separately below).
     cells: list[str] = []
     for severity in _SEVERITY_ORDER:
-        count = counts[severity]
+        count = verdict.severity_counts.get(severity, 0)
         label = f"{severity.value} {count}"
         cells.append(paint(label, _SEVERITY_STYLES[severity]) if count else label)
 
@@ -312,10 +330,17 @@ def _render_summary(
         result = f"no findings at or above '{threshold}' severity"
         result_style = _GREEN
 
+    total = f"total {verdict.total_findings} finding(s)"
+    if opts.min_severity is not Severity.INFO:
+        total += (
+            f" · {detected} at or above '{threshold}' severity ({verdict.hidden_findings} below)"
+        )
+
     suffix = f" (exit code {exit_code})" if exit_code is not None else ""
     return [
         paint("Summary", _BOLD),
         "  " + " · ".join(cells),
+        "  " + paint(total, _DIM),
         f"  {paint('Result:', _BOLD)} {paint(result + suffix, result_style)}",
     ]
 
@@ -324,6 +349,9 @@ def _render_notes(
     report: ScanReport, verdict: ScanVerdict, opts: RenderOptions, paint: _Painter
 ) -> list[str]:
     notes: list[str] = []
+    failure_note = _discovery_failure_note(report, paint)
+    if failure_note:
+        notes.append(failure_note)
     truncation = _truncation_note(report, paint)
     if truncation:
         notes.append(truncation)
@@ -345,15 +373,53 @@ def _render_notes(
                 _YELLOW,
             )
         )
+    if report.discovery.skipped_oversized_count:
+        notes.append(
+            paint(
+                f"Note: {report.discovery.skipped_oversized_count} file(s) exceeded the "
+                "per-file size limit and were not analyzed.",
+                _DIM,
+            )
+        )
+    if report.discovery.skipped_symlink_count:
+        notes.append(
+            paint(
+                f"Note: {report.discovery.skipped_symlink_count} symbolic link(s) were not "
+                "followed.",
+                _DIM,
+            )
+        )
     if opts.min_severity is not Severity.INFO:
         notes.append(
             paint(
                 f"Note: only findings at or above '{opts.min_severity.value}' severity affect "
-                "the result; every severity is counted above.",
+                "the result; the exit code ignores lower severities, but every finding is "
+                "counted in the summary above.",
                 _DIM,
             )
         )
     return notes
+
+
+def _discovery_failure_note(report: ScanReport, paint: _Painter) -> str | None:
+    """Warn when parts of the tree could not be read, so a clean result means little."""
+    discovery = report.discovery
+    if not discovery.has_discovery_failures:
+        return None
+    parts: list[str] = []
+    if discovery.unreadable_directory_count:
+        parts.append(_count_label(discovery.unreadable_directory_count, "directory", "directories"))
+    if discovery.unreadable_entry_count:
+        parts.append(_count_label(discovery.unreadable_entry_count, "entry", "entries"))
+    return paint(
+        "Warning: could not read " + " and ".join(parts) + ", so the scan is incomplete "
+        "and this result cannot be reported as clean.",
+        _RED,
+    )
+
+
+def _count_label(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
 
 
 def _truncation_note(report: ScanReport, paint: _Painter) -> str | None:

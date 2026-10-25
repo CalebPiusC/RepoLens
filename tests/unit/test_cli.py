@@ -23,7 +23,11 @@ from repolens.cli import (
     main,
 )
 from repolens.config import ScanConfig
-from repolens.exceptions import DiscoveryError, SensitiveFileAccessError
+from repolens.exceptions import (
+    DiscoveryAbortedError,
+    DiscoveryError,
+    SensitiveFileAccessError,
+)
 from repolens.models import AnalyzerOutcome, AnalyzerStatus, Finding, ScanReport, Severity
 
 
@@ -322,16 +326,94 @@ def test_failed_or_timed_out_analyzer_is_never_reported_as_clean(
     assert "exit code 3" in out
 
 
-def test_truncated_discovery_warns_but_scan_is_not_failed(
+def test_truncated_discovery_is_never_reported_as_clean(
     fake_engine: type[_FakeEngine],
     make_scan_report: Callable[..., ScanReport],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A resource-limit stop means part of the repository was never scanned.
+
+    Previously this exited 0 with only a warning, which let a partial scan masquerade as
+    a clean one in CI. It is now an incomplete scan (exit 3).
+    """
     fake_engine.report = make_scan_report(truncated_by_file_limit=True)
 
-    assert main(["scan", ".", "--color", "never"]) == EXIT_OK
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OPERATIONAL
 
-    assert "results may be incomplete" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "results may be incomplete" in out
+    assert "exit code 3" in out
+
+
+def test_truncation_with_findings_still_exits_one(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Findings outrank incompleteness, and the output must say both."""
+    fake_engine.report = make_scan_report(
+        findings=[make_finding(severity=Severity.HIGH)],
+        truncated_by_byte_limit=True,
+    )
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+
+    out = capsys.readouterr().out
+    assert "results may be incomplete" in out
+    assert "but the scan is incomplete" in out
+    assert "exit code 1" in out
+
+
+def test_unreadable_directory_is_reported_and_exits_three(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Discovery that could not read part of the tree must never look clean."""
+    fake_engine.report = make_scan_report(unreadable_directory_count=1)
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OPERATIONAL
+
+    out = capsys.readouterr().out
+    assert "could not read 1 directory" in out
+    assert "cannot be reported as clean" in out
+    assert "scan incomplete" in out
+    assert "exit code 3" in out
+
+
+def test_unreadable_entry_with_findings_exits_one(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    fake_engine.report = make_scan_report(
+        findings=[make_finding(severity=Severity.CRITICAL)],
+        unreadable_entry_count=2,
+    )
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+
+
+def test_findings_below_threshold_with_incomplete_scan_exits_three(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Hidden findings must not mask incompleteness: nothing actionable, but not clean."""
+    fake_engine.report = make_scan_report(
+        findings=[make_finding(severity=Severity.LOW)],
+        outcomes=[
+            AnalyzerOutcome(analyzer_name="flaky", status=AnalyzerStatus.FAILED, message="boom")
+        ],
+    )
+
+    assert main(["scan", ".", "--min-severity", "high", "--color", "never"]) == EXIT_OPERATIONAL
+
+    out = capsys.readouterr().out
+    assert "scan incomplete" in out
+    assert "exit code 3" in out
 
 
 # --------------------------------------------------------------------------------------
@@ -409,6 +491,40 @@ def test_interrupt_returns_130(
     captured = capsys.readouterr()
     assert "interrupted" in captured.err
     assert captured.out == ""
+
+
+def test_interrupt_during_rendering_returns_130(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ctrl-C must behave the same after the scan returns, not leak a traceback."""
+    fake_engine.report = make_scan_report()
+
+    def _interrupt(*args: object, **kwargs: object) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("repolens.cli.render_report", _interrupt)
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_INTERRUPTED
+
+    captured = capsys.readouterr()
+    assert "interrupted" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_mid_scan_security_abort_is_operational_not_usage(
+    fake_engine: type[_FakeEngine], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A security abort after the walk started did not scan "nothing"; it is exit 3."""
+    fake_engine.error = DiscoveryAbortedError("Entry escaped canonical root: link")
+
+    assert main(["scan", "."]) == EXIT_OPERATIONAL
+
+    err = capsys.readouterr().err
+    assert "aborted part-way" in err
+    assert "escaped canonical root" in err
 
 
 def test_unexpected_error_is_reported_without_traceback_or_secrets(
@@ -588,3 +704,47 @@ def test_blank_error_message_falls_back_to_exception_type(
 
     assert main(["scan", "."]) == EXIT_USAGE
     assert "DiscoveryError" in capsys.readouterr().err
+
+
+def test_interrupt_while_building_the_parser_returns_130(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An interrupt before argparse runs must still be a clean 130, not a traceback."""
+
+    def _interrupt() -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("repolens.cli.build_parser", _interrupt)
+
+    assert main(["scan", "."]) == EXIT_INTERRUPTED
+
+    captured = capsys.readouterr()
+    assert "interrupted" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_interrupt_while_resolving_options_returns_130(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An interrupt after parsing but before scanning is also a clean 130."""
+
+    def _interrupt(args: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("repolens.cli._scan_command", _interrupt)
+
+    assert main(["scan", "."]) == EXIT_INTERRUPTED
+    assert "interrupted" in capsys.readouterr().err
+
+
+def test_interrupt_class_is_not_treated_as_an_operational_error(
+    fake_engine: type[_FakeEngine], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """KeyboardInterrupt is a BaseException: it must never fall into the exit-3 handler."""
+    fake_engine.error = KeyboardInterrupt()
+
+    assert main(["scan", "."]) == EXIT_INTERRUPTED
+
+    err = capsys.readouterr().err
+    assert "internal error" not in err
+    assert "report it" not in err

@@ -101,7 +101,22 @@ Analyzers
 
 Summary
   critical 0 · high 0 · medium 1 · low 1 · info 0
+  total 2 finding(s)
   Result: 2 finding(s) detected at or above 'info' severity (exit code 1)
+```
+
+The per-severity counts always describe **every** finding in the report. `--min-severity`
+only decides which findings gate the exit code; the `total` line and the `Result` line make
+the difference explicit:
+
+```text
+Summary
+  critical 0 · high 0 · medium 1 · low 0 · info 0
+  total 1 finding(s) · 0 at or above 'high' severity (1 below)
+  Result: no findings at or above 'high' severity (exit code 0)
+
+Note: only findings at or above 'high' severity affect the result; the exit code ignores
+lower severities, but every finding is counted in the summary above.
 ```
 
 ### Options
@@ -109,7 +124,7 @@ Summary
 | Option | Description |
 | --- | --- |
 | `PATH` | Directory to scan. Defaults to `.`. Missing paths, regular files, and symlinked roots are rejected before any analyzer runs. |
-| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity are listed as actionable and affect the exit code. All severities are still counted in the summary. Default: `info`. |
+| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity affect the exit code and the `Result` line. Every finding is still listed and counted in the summary, and the `total` line reports how many are below the threshold. Default: `info`. |
 | `--max-findings N` | Maximum number of findings printed, `1`-`10000`. Default: `50`. Truncated output is announced. |
 | `--network-checks` | Enable the optional OSV.dev known-vulnerability lookups (requires network). Disabled by default. |
 | `--color {auto,always,never}` | Terminal coloring. `auto` colors only when stdout is a TTY and `NO_COLOR` is unset. Default: `auto`. |
@@ -125,22 +140,41 @@ repolens scan . --min-severity high   # a repository with only medium issues exi
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Scan completed; no finding met the `--min-severity` threshold. |
-| `1` | Scan completed; at least one finding met the threshold. |
+| `0` | Scan **completed over the whole repository** and no finding met the `--min-severity` threshold. |
+| `1` | At least one finding met the threshold (reported even if the scan was also incomplete). |
 | `2` | Invalid arguments or unusable target path. Nothing was scanned. |
-| `3` | Scan could not be completed: an analyzer failed or timed out, or an internal error occurred. |
+| `3` | Scan could not be completed: an analyzer failed or timed out, discovery could not read the whole repository, or an internal error occurred. |
 | `130` | Scan interrupted (Ctrl-C). |
 
 Notes on the policy:
 
-- `1` takes precedence over `3`: detected findings are reported even when another analyzer
-  failed.
-- A scan with a failed or timed-out analyzer never exits `0`, so an incomplete scan is never
-  mistaken for a clean one.
-- Analyzers marked `unavailable` (optional tools such as Ruff, Bandit, or Biome not installed)
-  are reported in the output but do not change the exit code, so CI is not broken by missing
-  optional tooling. Install `repolens[tools]` and Biome to close those gaps.
-- Discovery truncation (file/byte limits) prints a warning; findings still decide the exit code.
+- `1` takes precedence over `3`: detected findings are reported even when the rest of the
+  scan was incomplete. The output says both ("… detected …, but the scan is incomplete").
+- A scan is **incomplete** when any analyzer failed or timed out, when a directory or file
+  entry could not be read (for example `EACCES`/permission denied), or when discovery stopped
+  at the file-count or total-byte limit. An incomplete scan never exits `0`.
+- Only `unavailable` analyzers (optional tools such as Ruff, Bandit, or Biome not installed)
+  and `skipped` analyzers leave the exit code untouched, so CI is not broken by missing
+  optional tooling. They are still listed in the analyzer table with an explanatory note.
+  Install `repolens[tools]` and Biome to close those gaps.
+- Large repositories that hit the resource limits can raise them through the programmatic
+  API (`ScanConfig(max_files=…, max_total_bytes=…)`); the CLI uses the defaults.
+- Exit codes `2` and `3` both mean "no trustworthy clean result": `2` means nothing was
+  scanned at all, `3` means scanning started but the coverage is incomplete.
+
+#### Partial scans and false-clean protection
+
+Discovery reports three distinct kinds of missing coverage, all surfaced as warnings in the
+output and all treated as an incomplete scan (exit `3` unless findings take precedence):
+
+| Situation | Reported as |
+| --- | --- |
+| Directory could not be opened (`os.scandir` raised `OSError`) | `Warning: could not read N directories, …` |
+| Entry could not be inspected (stat/resolve failed) | `Warning: could not read … N entries, …` |
+| File-count or byte limit reached | `Warning: discovery stopped early after reaching the … limit` |
+
+Files skipped by policy (oversized files, symbolic links) do not make a scan incomplete, but
+they are disclosed with a `Note:` line so their absence is visible.
 
 Typical CI usage:
 
@@ -164,8 +198,15 @@ $ echo $?
 2
 ```
 
+A security abort that happens *after* discovery started is not reported as a usage error
+(nothing was scanned); it exits `3` with `repolens: error: scan aborted part-way: …`, because
+part of the repository was already scanned.
+
 Unexpected internal errors are reported with the exception type and a scrubbed message plus a
 link to the issue tracker; secrets are redacted before anything is printed.
+
+`Ctrl-C` returns `130` whether it arrives during discovery, during an analyzer, or while the
+report is being rendered and printed — no traceback is shown in any of those cases.
 
 ## Optional external tools
 

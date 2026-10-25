@@ -20,7 +20,7 @@ from typing import Final, TextIO
 from repolens import __version__
 from repolens.config import ScanConfig
 from repolens.engine import ScanEngine
-from repolens.exceptions import DiscoveryError, RepoLensError
+from repolens.exceptions import DiscoveryAbortedError, DiscoveryError, RepoLensError
 from repolens.models import ScanReport, Severity
 from repolens.redaction import redact_secrets
 from repolens.reporting import RenderOptions, evaluate, render_report
@@ -36,7 +36,8 @@ EXIT_USAGE: Final = 2
 """Invalid arguments, or the target path is missing, not a directory, or unsafe."""
 
 EXIT_OPERATIONAL: Final = 3
-"""The scan could not be completed (analyzer failure/timeout or internal error)."""
+"""The scan could not be completed: analyzer failure/timeout, incomplete discovery, or an
+internal error. Never returned for a scan that covered the whole repository."""
 
 EXIT_INTERRUPTED: Final = 130
 """The scan was interrupted (Ctrl-C), matching shell conventions for SIGINT."""
@@ -52,8 +53,11 @@ exit codes:
   0  scan completed, no findings at or above the severity threshold
   1  scan completed, findings at or above the severity threshold were detected
   2  invalid arguments or unusable target path (nothing was scanned)
-  3  scan could not be completed (analyzer failure/timeout or internal error)
+  3  scan could not be completed: an analyzer failed or timed out, discovery could
+     not read the whole repository, or an internal error occurred
   130  scan interrupted (Ctrl-C)
+
+Exit codes 2 and 3 both mean "do not trust a clean result"; only 0 means clean.
 
 RepoLens is a static analyzer: it never executes code, installs dependencies, or runs
 test suites from the repository it scans.
@@ -132,8 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=_SEVERITY_CHOICES,
         default=Severity.INFO.value,
         metavar="{info,low,medium,high,critical}",
-        help="only findings at or above this severity are reported or affect the exit code "
-        "(default: info)",
+        help="only findings at or above this severity affect the exit code and the result "
+        "line; every finding is still counted in the summary (default: info)",
     )
     scan_parser.add_argument(
         "--max-findings",
@@ -162,7 +166,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     ``argparse`` exits through ``SystemExit`` for ``--help``/``--version`` and usage
     errors; those codes are returned instead so callers (and tests) always get an int.
+    ``KeyboardInterrupt`` is handled once, here, so an interrupt anywhere in parsing,
+    option resolution, scanning, rendering, or output behaves the same way.
     """
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print("\nrepolens: interrupted.", file=sys.stderr)
+        return EXIT_INTERRUPTED
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -201,10 +215,20 @@ class _ScanCommand:
     def run(self, *, stdout: TextIO, stderr: TextIO) -> int:
         """Execute the scan, print the report, and return the exit code."""
         try:
-            report = ScanEngine(config=self.config).scan(self.target)
+            return self._run(stdout=stdout, stderr=stderr)
         except KeyboardInterrupt:
+            # Ctrl-C during rendering or output must behave like Ctrl-C during the scan.
             print("\nrepolens: scan interrupted.", file=stderr)
             return EXIT_INTERRUPTED
+
+    def _run(self, *, stdout: TextIO, stderr: TextIO) -> int:
+        try:
+            report = ScanEngine(config=self.config).scan(self.target)
+        except DiscoveryAbortedError as exc:
+            # Discovery started and then refused to continue, so scanning did happen:
+            # this is an operational failure, not a "nothing was scanned" usage error.
+            print(f"repolens: error: scan aborted part-way: {_safe(exc)}", file=stderr)
+            return EXIT_OPERATIONAL
         except DiscoveryError as exc:
             print(f"repolens: error: {_safe(exc)}", file=stderr)
             return EXIT_USAGE
@@ -259,8 +283,12 @@ def _scan_command(args: argparse.Namespace) -> _ScanCommand:
 def determine_exit_code(report: ScanReport, min_severity: Severity = Severity.INFO) -> int:
     """Map a completed scan to its documented exit code.
 
-    Findings take precedence over incompleteness because they are directly actionable,
-    and an incomplete scan is never reported as clean (it returns ``EXIT_OPERATIONAL``).
+    Findings take precedence over incompleteness because they are directly actionable.
+    Otherwise an incomplete scan — a failed/timed-out analyzer, discovery that stopped at a
+    resource limit, or directories/entries that could not be read — returns
+    ``EXIT_OPERATIONAL`` rather than ``EXIT_OK``, so partial coverage is never reported as
+    clean. Only ``UNAVAILABLE`` (optional tool missing) and ``SKIPPED`` analyzers leave the
+    exit code untouched.
     """
     verdict = evaluate(report, min_severity)
     if verdict.has_findings:

@@ -253,7 +253,26 @@ class DiscoverySummary(BaseModel):
     sensitive_files_detected: int = Field(ge=0)
     truncated_by_file_limit: bool = False
     truncated_by_byte_limit: bool = False
+    # Directories/entries the walker could not inspect (e.g. permission denied). These
+    # mean the scan silently saw less of the repository than exists, so no consumer may
+    # report such a scan as clean.
+    unreadable_directory_count: int = Field(default=0, ge=0)
+    unreadable_entry_count: int = Field(default=0, ge=0)
     detected_languages: list[DetectedLanguage] = Field(default_factory=list)
+
+    @property
+    def has_discovery_failures(self) -> bool:
+        """True when part of the tree could not be inspected at all."""
+        return self.unreadable_directory_count > 0 or self.unreadable_entry_count > 0
+
+    @property
+    def is_partial(self) -> bool:
+        """True when discovery stopped early or could not inspect part of the repository."""
+        return (
+            self.has_discovery_failures
+            or self.truncated_by_file_limit
+            or self.truncated_by_byte_limit
+        )
 
 
 class ScanReport(BaseModel):

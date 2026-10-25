@@ -182,3 +182,40 @@ def test_entry_point_exit_code_is_usable_from_a_shell_pipeline(
     )
     assert result.returncode != 0
     assert "finding(s) detected" in result.stdout
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses directory permissions",
+)
+def test_entry_point_unreadable_directory_is_not_reported_clean(
+    make_python_repo: Callable[..., Path], packaged_cli_available: bool
+) -> None:
+    """End-to-end regression for the false-clean scan caused by a swallowed OSError."""
+    if not packaged_cli_available:  # pragma: no cover - environment dependent
+        pytest.skip("repolens console script is not installed in this environment")
+
+    # A healthy fixture that scans clean; hiding part of it must not keep it clean.
+    repo = make_python_repo(include_license=False)  # one MEDIUM finding, exit 1
+    assert _run(["scan", str(repo), "--min-severity", "critical"]).returncode == 0
+
+    locked = repo / "locked"
+    locked.mkdir()
+    (locked / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+    locked.chmod(0o000)
+    try:
+        try:
+            list(os.scandir(locked))
+        except PermissionError:
+            pass
+        else:  # pragma: no cover - platform dependent
+            pytest.skip("this platform does not enforce directory permissions")
+        result = _run(["scan", str(repo), "--min-severity", "critical", "--color", "never"])
+    finally:
+        locked.chmod(0o755)
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "could not read 1 directory" in result.stdout
+    assert "cannot be reported as clean" in result.stdout
+    assert "exit code 3" in result.stdout

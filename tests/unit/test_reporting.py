@@ -331,3 +331,130 @@ def test_info_only_findings_use_non_red_result_style(
     # INFO-only findings below the medium threshold are highlighted yellow, not red.
     assert "\x1b[93m" in colored
     assert "1 finding(s) detected at or above 'info' severity" in colored
+
+
+# --------------------------------------------------------------------------------------
+# Severity accounting: counts describe the report, the threshold only gates the exit code
+# --------------------------------------------------------------------------------------
+
+
+def test_severity_counts_include_findings_below_the_threshold(
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    """Regression: counts used to be filtered by --min-severity while claiming not to be."""
+    findings = [
+        make_finding(rule_id="RL-CRIT-001", severity=Severity.CRITICAL),
+        make_finding(rule_id="RL-LOW-001", severity=Severity.LOW),
+        make_finding(rule_id="RL-LOW-002", severity=Severity.LOW),
+        make_finding(rule_id="RL-INFO-001", severity=Severity.INFO),
+    ]
+    output = render_report(
+        make_scan_report(findings=findings),
+        options=RenderOptions(min_severity=Severity.HIGH),
+        exit_code=1,
+    )
+
+    counts_line = next(line for line in output.splitlines() if "critical 1" in line)
+    assert "high 0" in counts_line
+    assert "medium 0" in counts_line
+    assert "low 2" in counts_line
+    assert "info 1" in counts_line
+
+    # The total is the real number of findings, not the filtered subset.
+    assert "total 4 finding(s) · 1 at or above 'high' severity (3 below)" in output
+    assert "1 finding(s) detected at or above 'high' severity (exit code 1)" in output
+
+
+def test_counts_line_is_unfiltered_when_threshold_is_info(
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    report = make_scan_report(
+        findings=[
+            make_finding(rule_id="RL-MED-001", severity=Severity.MEDIUM),
+            make_finding(rule_id="RL-LOW-001", severity=Severity.LOW),
+        ]
+    )
+    output = render_report(report, exit_code=1)
+
+    assert "medium 1" in output
+    assert "low 1" in output
+    assert "total 2 finding(s)" in output
+    assert "at or above 'info' severity (0 below)" not in output
+
+
+def test_threshold_note_does_not_overclaim_what_is_counted(
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    output = render_report(
+        make_scan_report(findings=[make_finding(severity=Severity.LOW)]),
+        options=RenderOptions(min_severity=Severity.HIGH),
+        exit_code=0,
+    )
+
+    assert "only findings at or above 'high' severity affect the result" in output
+    assert "every finding is counted in the summary above" in output
+    assert "every severity is counted above" not in output
+
+
+# --------------------------------------------------------------------------------------
+# Incomplete discovery
+# --------------------------------------------------------------------------------------
+
+
+def test_unreadable_directory_makes_the_scan_incomplete(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report(unreadable_directory_count=1)
+    verdict = evaluate(report)
+
+    assert verdict.discovery_incomplete is True
+    assert verdict.is_incomplete is True
+    assert verdict.is_clean is False
+
+    output = render_report(report, exit_code=3)
+    assert "could not read 1 directory, so the scan is incomplete" in output
+    assert "scan incomplete" in output
+    assert "(exit code 3)" in output
+
+
+def test_unreadable_entries_are_pluralized_and_reported(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report(unreadable_directory_count=2, unreadable_entry_count=3)
+    output = render_report(report, exit_code=3)
+
+    assert "could not read 2 directories and 3 entries" in output
+
+
+def test_truncation_alone_makes_the_scan_incomplete(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    verdict = evaluate(make_scan_report(truncated_by_byte_limit=True))
+
+    assert verdict.discovery_truncated is True
+    assert verdict.discovery_incomplete is True
+    assert verdict.is_clean is False
+
+
+def test_complete_discovery_is_not_flagged(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    verdict = evaluate(make_scan_report())
+
+    assert verdict.discovery_incomplete is False
+    assert verdict.is_clean is True
+
+
+def test_oversized_and_symlinked_files_are_disclosed(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report(skipped_oversized_count=4, skipped_symlink_count=1)
+    output = render_report(report)
+
+    assert "4 file(s) exceeded the per-file size limit" in output
+    assert "1 symbolic link(s) were not followed" in output
+    # Disclosure only: policy skips do not make a scan incomplete.
+    assert evaluate(report).is_incomplete is False
