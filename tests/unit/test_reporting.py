@@ -258,8 +258,8 @@ def test_report_without_analyzers_renders_notice(
 def test_target_path_is_rendered_when_provided(
     make_scan_report: Callable[..., ScanReport],
 ) -> None:
-    output = render_report(make_scan_report(), target_path="/tmp/some-repo")
-    assert "Target: /tmp/some-repo" in output
+    output = render_report(make_scan_report(), target_path="/srv/projects/some-repo")
+    assert "Target: /srv/projects/some-repo" in output
 
 
 def test_sensitive_severity_labels_are_uppercase(
