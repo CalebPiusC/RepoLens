@@ -152,3 +152,33 @@ def test_repolens_repository_passes_self_scan() -> None:
     # The only tolerated advisory is the documented informational lockfile note for a
     # library that intentionally does not commit a Python lockfile.
     assert {f.rule_id for f in report.findings} <= {"RL-DEP-005"}
+
+
+def test_engine_records_partial_coverage_from_analyzers(
+    make_python_repo: Callable[..., Path],
+) -> None:
+    """A completed-but-limited analyzer must be visible in the report, not silently green."""
+
+    class _PartialAnalyzer(Analyzer):
+        @property
+        def name(self) -> str:
+            return "partial-analyzer"
+
+        def is_applicable(self, context: RepositoryContext) -> bool:
+            return True
+
+        def completion_message(self) -> str | None:
+            return "Only analyzed part of the repository."
+
+        def coverage_partial(self) -> bool:
+            return True
+
+        def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
+            return []
+
+    report = ScanEngine(analyzers=[_PartialAnalyzer()]).scan(make_python_repo())
+    outcome = report.analyzer_outcomes[0]
+
+    assert outcome.status == AnalyzerStatus.COMPLETED
+    assert outcome.coverage_truncated is True
+    assert outcome.message == "Only analyzed part of the repository."

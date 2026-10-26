@@ -392,6 +392,7 @@ def discover_repository(repo_path: Path, config: ScanConfig | None = None) -> Re
     truncated_by_byte_limit = False
     unreadable_directory_count = 0
     unreadable_entry_count = 0
+    skipped_by_depth_count = 0
 
     # Iterative DFS stack: (directory_path, relative_posix_prefix, depth)
     stack: list[tuple[Path, str, int]] = [(canonical_root, "", 0)]
@@ -436,6 +437,11 @@ def discover_repository(repo_path: Path, config: ScanConfig | None = None) -> Re
                         continue
                     if depth < MAX_DIRECTORY_DEPTH:
                         subdirs_to_push.append((entry_path, rel_posix, depth + 1))
+                    else:
+                        # Beyond the supported nesting depth the subtree is not walked at
+                        # all. Record it: nested sources would otherwise go unchecked
+                        # while the scan still looked complete.
+                        skipped_by_depth_count += 1
                     continue
 
                 if not entry.is_file(follow_symlinks=False):
@@ -505,6 +511,7 @@ def discover_repository(repo_path: Path, config: ScanConfig | None = None) -> Re
         truncated_by_byte_limit=truncated_by_byte_limit,
         unreadable_directory_count=unreadable_directory_count,
         unreadable_entry_count=unreadable_entry_count,
+        skipped_by_depth_count=skipped_by_depth_count,
         detected_languages=detected_languages,
     )
 

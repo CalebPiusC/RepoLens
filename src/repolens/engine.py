@@ -166,6 +166,7 @@ class ScanEngine:
                         findings_count=len(analyzer_findings),
                         duration_ms=analyzer_duration,
                         message=analyzer.completion_message(),
+                        coverage_truncated=_coverage_partial(analyzer),
                     )
                 )
 
@@ -181,6 +182,14 @@ class ScanEngine:
             analyzer_outcomes=outcomes,
             findings=ordered_findings,
         )
+
+
+def _coverage_partial(analyzer: Analyzer) -> bool:
+    """Best-effort read of the analyzer's coverage flag; never fail a completed scan."""
+    try:
+        return bool(analyzer.coverage_partial())
+    except Exception:  # pragma: no cover - defensive only
+        return False
 
 
 def _safe_analyzer_name(analyzer: Analyzer) -> str:

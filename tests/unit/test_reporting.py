@@ -458,3 +458,107 @@ def test_oversized_and_symlinked_files_are_disclosed(
     assert "1 symbolic link(s) were not followed" in output
     # Disclosure only: policy skips do not make a scan incomplete.
     assert evaluate(report).is_incomplete is False
+
+
+# --------------------------------------------------------------------------------------
+# Nesting-depth limit and analyzer coverage limits
+# --------------------------------------------------------------------------------------
+
+
+def test_depth_limited_discovery_makes_the_scan_incomplete(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report(skipped_by_depth_count=1)
+    verdict = evaluate(report)
+
+    assert verdict.discovery_depth_limited is True
+    assert verdict.discovery_incomplete is True
+    assert verdict.is_incomplete is True
+    assert verdict.is_clean is False
+
+
+def test_depth_limit_is_explained_with_the_supported_limit(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    from repolens.discovery import MAX_DIRECTORY_DEPTH
+
+    output = render_report(make_scan_report(skipped_by_depth_count=2), exit_code=3)
+
+    assert "discovery skipped 2 directories nested deeper than the supported limit" in output
+    assert f"limit of {MAX_DIRECTORY_DEPTH} levels" in output
+    assert "cannot be reported as clean" in output
+    assert "Result: scan incomplete" in output
+
+
+def test_depth_note_is_absent_for_normal_repositories(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    output = render_report(make_scan_report())
+
+    assert "nested deeper than" not in output
+
+
+def test_depth_limit_plus_findings_reports_both(
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    report = make_scan_report(
+        findings=[make_finding(severity=Severity.HIGH)], skipped_by_depth_count=1
+    )
+
+    output = render_report(report, exit_code=1)
+
+    assert "but the scan is incomplete" in output
+    assert "nested deeper than the supported limit" in output
+    assert "(exit code 1)" in output
+
+
+def test_analyzer_coverage_limit_makes_the_scan_incomplete(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="ruff-python-lint",
+                status=AnalyzerStatus.COMPLETED,
+                coverage_truncated=True,
+                message="Ruff only analyzed 2000 Python file(s).",
+            )
+        ]
+    )
+    verdict = evaluate(report)
+
+    assert verdict.partial_coverage_analyzers[0].analyzer_name == "ruff-python-lint"
+    assert verdict.is_incomplete is True
+
+    output = render_report(report, exit_code=3)
+    assert "1 analyzer(s) covered only part of the repository" in output
+    assert "ruff-python-lint" in output
+    assert "The scan is incomplete." in output
+
+
+def test_completed_analyzer_without_truncation_is_not_flagged(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(analyzer_name="ruff-python-lint", status=AnalyzerStatus.COMPLETED)
+        ]
+    )
+
+    assert evaluate(report).partial_coverage_analyzers == ()
+    assert evaluate(report).is_incomplete is False
+
+
+def test_excluded_directories_are_disclosed_on_the_discovery_line(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report()
+    report = report.model_copy(
+        update={"discovery": report.discovery.model_copy(update={"skipped_excluded_count": 3})}
+    )
+
+    output = render_report(report)
+
+    assert "3 dirs excluded" in output
+    assert evaluate(report).is_incomplete is False

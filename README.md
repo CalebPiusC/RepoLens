@@ -87,7 +87,7 @@ Example output (colors omitted):
 ```text
 RepoLens 0.1.0 · my-service
 Target: ../my-service
-Scanned 412 file(s) · 3.4 MiB · in 812 ms · languages: python, typescript
+Scanned 412 file(s) · 3.4 MiB · in 812 ms · languages: python, typescript · 3 dirs excluded
 
 Findings — 2 at or above 'info' severity
   SEVERITY  RULE           LOCATION            MESSAGE
@@ -151,30 +151,47 @@ Notes on the policy:
 - `1` takes precedence over `3`: detected findings are reported even when the rest of the
   scan was incomplete. The output says both ("… detected …, but the scan is incomplete").
 - A scan is **incomplete** when any analyzer failed or timed out, when a directory or file
-  entry could not be read (for example `EACCES`/permission denied), or when discovery stopped
-  at the file-count or total-byte limit. An incomplete scan never exits `0`.
+  entry could not be read (for example `EACCES`/permission denied), when discovery stopped at
+  the file-count or total-byte limit, when a subtree was nested deeper than the supported
+  walk depth, or when an analyzer only covered part of the repository because its file limit
+  was reached. An incomplete scan never exits `0`.
 - Only `unavailable` analyzers (optional tools such as Ruff, Bandit, or Biome not installed)
   and `skipped` analyzers leave the exit code untouched, so CI is not broken by missing
   optional tooling. They are still listed in the analyzer table with an explanatory note.
   Install `repolens[tools]` and Biome to close those gaps.
-- Large repositories that hit the resource limits can raise them through the programmatic
-  API (`ScanConfig(max_files=…, max_total_bytes=…)`); the CLI uses the defaults.
+- Large or deeply nested repositories that hit a resource limit can raise it through the
+  programmatic API (`ScanConfig(max_files=…, max_total_bytes=…, max_tool_files=…)`); the CLI
+  uses the defaults (10 000 files, 50 MiB in total, 2 000 files per external tool).
 - Exit codes `2` and `3` both mean "no trustworthy clean result": `2` means nothing was
   scanned at all, `3` means scanning started but the coverage is incomplete.
 
 #### Partial scans and false-clean protection
 
-Discovery reports three distinct kinds of missing coverage, all surfaced as warnings in the
-output and all treated as an incomplete scan (exit `3` unless findings take precedence):
+Coverage gaps that could hide a finding are surfaced as warnings in the output and all make
+the scan incomplete (exit `3` unless a finding at or above the threshold takes precedence
+with exit `1`):
 
-| Situation | Reported as |
-| --- | --- |
-| Directory could not be opened (`os.scandir` raised `OSError`) | `Warning: could not read N directories, …` |
-| Entry could not be inspected (stat/resolve failed) | `Warning: could not read … N entries, …` |
-| File-count or byte limit reached | `Warning: discovery stopped early after reaching the … limit` |
+| Situation | Reported as | Exit code |
+| --- | --- | --- |
+| Directory could not be opened (`os.scandir` raised `OSError`) | `Warning: could not read N directories, …` | `3` (or `1` with findings) |
+| Entry could not be inspected (stat/resolve failed) | `Warning: could not read … N entries, …` | `3` (or `1` with findings) |
+| File-count or byte limit reached | `Warning: discovery stopped early after reaching the … limit` | `3` (or `1` with findings) |
+| Subtree deeper than `MAX_DIRECTORY_DEPTH` (64 levels) | `Warning: discovery skipped N directories nested deeper than the supported limit of 64 levels, …` | `3` (or `1` with findings) |
+| Analyzer hit `max_tool_files`, so it linted only some files | `Warning: N analyzer(s) covered only part of the repository because a file limit was reached …` | `3` (or `1` with findings) |
 
-Files skipped by policy (oversized files, symbolic links) do not make a scan incomplete, but
-they are disclosed with a `Note:` line so their absence is visible.
+Deliberate policy skips are **disclosed but do not change the exit code**, because removing
+them would make ordinary repositories look broken:
+
+| Situation | Why it stays non-blocking | Disclosed as |
+| --- | --- | --- |
+| Excluded directories (`.git`, `node_modules`, `.venv`, `dist`, `build`, `out`, `target`, `coverage`, …) | Conventional VCS/vendor/build output that is not project source; the list is fixed and never read from the scanned repository's configuration | `· N dirs excluded` on the `Scanned …` line |
+| Symbolic links | Security boundary: RepoLens never follows symlinks out of the repository | `Note: N symbolic link(s) were not followed.` |
+| Files above `max_file_size_bytes` | Per-file resource cap prevents unbounded reads | `Note: N file(s) exceeded the per-file size limit and were not analyzed.` |
+
+A file that is neither a regular file nor a directory (socket, FIFO, device) is skipped
+without a counter; such entries can never contain analyzable source, so this cannot hide a
+finding. Directories skipped by the depth limit are the only "nested" case that can hide real
+source, which is why they make the scan incomplete.
 
 Typical CI usage:
 

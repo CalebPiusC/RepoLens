@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
+from repolens.discovery import MAX_DIRECTORY_DEPTH
 from repolens.models import AnalyzerOutcome, AnalyzerStatus, Finding, ScanReport, Severity
 
 _MAX_MESSAGE_CHARS: Final = 108
@@ -87,6 +88,8 @@ class ScanVerdict:
     unavailable_analyzers: tuple[AnalyzerOutcome, ...]
     discovery_failures: int = 0
     discovery_truncated: bool = False
+    discovery_depth_limited: bool = False
+    partial_coverage_analyzers: tuple[AnalyzerOutcome, ...] = ()
 
     @property
     def has_findings(self) -> bool:
@@ -101,12 +104,18 @@ class ScanVerdict:
     @property
     def discovery_incomplete(self) -> bool:
         """True when discovery could not see the whole repository."""
-        return self.discovery_failures > 0 or self.discovery_truncated
+        return (
+            self.discovery_failures > 0 or self.discovery_truncated or self.discovery_depth_limited
+        )
 
     @property
     def is_incomplete(self) -> bool:
         """True when coverage is incomplete, whether from analyzers or discovery."""
-        return bool(self.incomplete_analyzers) or self.discovery_incomplete
+        return (
+            bool(self.incomplete_analyzers)
+            or self.discovery_incomplete
+            or bool(self.partial_coverage_analyzers)
+        )
 
     @property
     def is_clean(self) -> bool:
@@ -132,6 +141,12 @@ def evaluate(report: ScanReport, min_severity: Severity = Severity.INFO) -> Scan
         ),
         discovery_truncated=(
             report.discovery.truncated_by_file_limit or report.discovery.truncated_by_byte_limit
+        ),
+        discovery_depth_limited=report.discovery.depth_limited,
+        partial_coverage_analyzers=tuple(
+            outcome
+            for outcome in report.analyzer_outcomes
+            if outcome.status is AnalyzerStatus.COMPLETED and outcome.coverage_truncated
         ),
         incomplete_analyzers=tuple(
             outcome
@@ -206,6 +221,10 @@ def _render_discovery(report: ScanReport, paint: _Painter) -> str:
     if discovery.detected_languages:
         languages = ", ".join(language.value for language in discovery.detected_languages)
         parts.append(f"languages: {languages}")
+    if discovery.skipped_excluded_count:
+        # Convention-based skips (.git, node_modules, dist, ...) are intentional, but the
+        # reader should still see that directories were left out of the count.
+        parts.append(f"{_count_label(discovery.skipped_excluded_count, 'dir', 'dirs')} excluded")
     return paint(" · ".join(parts), _DIM)
 
 
@@ -352,9 +371,22 @@ def _render_notes(
     failure_note = _discovery_failure_note(report, paint)
     if failure_note:
         notes.append(failure_note)
+    depth = _depth_note(report, paint)
+    if depth:
+        notes.append(depth)
     truncation = _truncation_note(report, paint)
     if truncation:
         notes.append(truncation)
+    if verdict.partial_coverage_analyzers:
+        names = ", ".join(outcome.analyzer_name for outcome in verdict.partial_coverage_analyzers)
+        notes.append(
+            paint(
+                f"Warning: {len(verdict.partial_coverage_analyzers)} analyzer(s) covered only "
+                f"part of the repository because a file limit was reached: {names}. "
+                "The scan is incomplete.",
+                _RED,
+            )
+        )
     if verdict.incomplete_analyzers:
         names = ", ".join(outcome.analyzer_name for outcome in verdict.incomplete_analyzers)
         notes.append(
@@ -420,6 +452,19 @@ def _discovery_failure_note(report: ScanReport, paint: _Painter) -> str | None:
 
 def _count_label(count: int, singular: str, plural: str) -> str:
     return f"{count} {singular if count == 1 else plural}"
+
+
+def _depth_note(report: ScanReport, paint: _Painter) -> str | None:
+    """Explain the nesting-depth limit, since it makes a scan incomplete."""
+    count = report.discovery.skipped_by_depth_count
+    if not count:
+        return None
+    return paint(
+        f"Warning: discovery skipped {_count_label(count, 'directory', 'directories')} nested "
+        f"deeper than the supported limit of {MAX_DIRECTORY_DEPTH} levels, so the scan is "
+        "incomplete and this result cannot be reported as clean.",
+        _RED,
+    )
 
 
 def _truncation_note(report: ScanReport, paint: _Painter) -> str | None:

@@ -748,3 +748,79 @@ def test_interrupt_class_is_not_treated_as_an_operational_error(
     err = capsys.readouterr().err
     assert "internal error" not in err
     assert "report it" not in err
+
+
+def test_depth_limited_discovery_exits_three(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Directories beyond the nesting limit make the scan incomplete, not clean."""
+    fake_engine.report = make_scan_report(skipped_by_depth_count=1)
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OPERATIONAL
+
+    out = capsys.readouterr().out
+    assert "nested deeper than the supported limit" in out
+    assert "cannot be reported as clean" in out
+    assert "exit code 3" in out
+
+
+def test_depth_limit_with_findings_exits_one(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    fake_engine.report = make_scan_report(
+        findings=[make_finding(severity=Severity.MEDIUM)], skipped_by_depth_count=2
+    )
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+
+
+def test_tool_coverage_limit_exits_three(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An analyzer capped by max_tool_files did not cover the whole repository."""
+    fake_engine.report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="bandit-python-security",
+                status=AnalyzerStatus.COMPLETED,
+                coverage_truncated=True,
+            )
+        ]
+    )
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OPERATIONAL
+
+    out = capsys.readouterr().out
+    assert "covered only part of the repository" in out
+    assert "bandit-python-security" in out
+    assert "exit code 3" in out
+
+
+def make_dir_tree(root: Path) -> Path:
+    """Build a repository whose only interesting file sits past the depth limit."""
+    (root / "a" / "b" / "c").mkdir(parents=True)
+    (root / "a" / "b" / "c" / "buried.py").write_text("def broken(:\n", encoding="utf-8")
+    (root / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    return root
+
+
+def test_real_depth_limited_scan_exits_three(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End-to-end through the real engine with the production depth limit lowered."""
+    monkeypatch.setattr("repolens.discovery.MAX_DIRECTORY_DEPTH", 2)
+    repo = make_dir_tree(tmp_path / "deep")
+    (repo / "LICENSE").write_text("MIT License\nCopyright (c) 2026 Test\n", encoding="utf-8")
+    (repo / "README.md").write_text("# Deep\n\nA repo.\n", encoding="utf-8")
+
+    exit_code = main(["scan", str(repo), "--min-severity", "critical", "--color", "never"])
+
+    out = capsys.readouterr().out
+    assert exit_code == EXIT_OPERATIONAL
+    assert "nested deeper than the supported limit" in out

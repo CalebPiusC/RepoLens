@@ -18,7 +18,7 @@ from repolens.analyzers.tooling import (
     iter_batches,
     repository_relative_path,
     run_tool,
-    select_source_files,
+    select_source_files_with_status,
     tool_version,
     tool_workspace,
     untrusted_config_message,
@@ -129,6 +129,7 @@ class RuffAnalyzer(Analyzer):
 
     def __init__(self) -> None:
         self._message: str | None = None
+        self._coverage_partial = False
 
     @property
     def name(self) -> str:
@@ -143,9 +144,16 @@ class RuffAnalyzer(Analyzer):
     def completion_message(self) -> str | None:
         return self._message
 
+    def coverage_partial(self) -> bool:
+        return self._coverage_partial
+
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
         self._message = None
-        files = select_source_files(context, _PYTHON_SUFFIXES, config.max_tool_files)
+        self._coverage_partial = False
+        files, capped = select_source_files_with_status(
+            context, _PYTHON_SUFFIXES, config.max_tool_files
+        )
+        self._coverage_partial = capped
         if not files:
             self._message = "No eligible Python source files were found for Ruff analysis."
             return []
@@ -191,13 +199,20 @@ class RuffAnalyzer(Analyzer):
                     truncated = True
                     break
 
+        parts: list[str] = []
+        if capped:
+            parts.append(
+                f"Ruff only analyzed {len(files)} Python file(s): the max_tool_files limit "
+                f"({config.max_tool_files}) was reached, so other files were not linted."
+            )
         if truncated:
-            self._message = (
+            parts.append(
                 f"Ruff findings truncated to {config.max_findings_per_analyzer}; "
                 f"{len(files)} file(s) considered."
             )
-        else:
-            self._message = f"Ruff analyzed {len(files)} Python file(s)."
+        if not parts:
+            parts.append(f"Ruff analyzed {len(files)} Python file(s).")
+        self._message = " ".join(parts)
         return findings
 
     def _parse_diagnostics(
@@ -291,9 +306,16 @@ class BanditAnalyzer(Analyzer):
     def completion_message(self) -> str | None:
         return self._message
 
+    def coverage_partial(self) -> bool:
+        return self._coverage_partial
+
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
         self._message = None
-        files = select_source_files(context, _PYTHON_SUFFIXES, config.max_tool_files)
+        self._coverage_partial = False
+        files, capped = select_source_files_with_status(
+            context, _PYTHON_SUFFIXES, config.max_tool_files
+        )
+        self._coverage_partial = capped
         if not files:
             self._message = "No eligible Python source files were found for Bandit analysis."
             return []
@@ -329,6 +351,11 @@ class BanditAnalyzer(Analyzer):
                     break
 
         parts: list[str] = []
+        if capped:
+            parts.append(
+                f"Bandit only analyzed {len(files)} Python file(s): the max_tool_files limit "
+                f"({config.max_tool_files}) was reached, so other files were not scanned."
+            )
         config_note = untrusted_config_message(context, frozenset({".bandit", "bandit.yaml"}))
         if config_note:
             parts.append(config_note)

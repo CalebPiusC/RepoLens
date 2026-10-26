@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from repolens.config import ScanConfig
-from repolens.discovery import discover_repository
+from repolens.discovery import MAX_DIRECTORY_DEPTH, discover_repository
 from repolens.engine import ScanEngine
 from repolens.exceptions import DiscoveryAbortedError
 
@@ -207,3 +207,181 @@ def test_scan_config_limits_mark_discovery_partial(tmp_path: Path) -> None:
     assert capped.summary.truncated_by_file_limit is True
     assert capped.summary.has_discovery_failures is False
     assert capped.summary.is_partial is True
+
+
+# --------------------------------------------------------------------------------------
+# Nesting-depth limit
+# --------------------------------------------------------------------------------------
+
+
+def _bury(root: Path, depth: int) -> Path:
+    """Nest to exactly ``depth`` levels below ``root`` and return the unreachable subtree.
+
+    The walker stops pushing subdirectories once it reaches ``MAX_DIRECTORY_DEPTH``, so the
+    returned directory is the first one it refuses to enter.
+    """
+    current = root
+    for index in range(depth):
+        current = current / f"d{index}"
+    current.mkdir(parents=True)
+    buried = current / "buried"
+    buried.mkdir()
+    (buried / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    return buried
+
+
+def test_directories_beyond_the_depth_limit_are_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subtree skipped for exceeding MAX_DIRECTORY_DEPTH must be reported, not dropped."""
+    monkeypatch.setattr("repolens.discovery.MAX_DIRECTORY_DEPTH", 3)
+    repo = tmp_path / "deep"
+    repo.mkdir()
+    (repo / "shallow.py").write_text("x = 1\n", encoding="utf-8")
+    _bury(repo, 3)
+
+    context = discover_repository(repo, ScanConfig())
+
+    assert context.summary.skipped_by_depth_count == 1
+    assert context.summary.depth_limited is True
+    assert context.summary.is_partial is True
+    assert context.has_file("shallow.py")
+    assert not context.has_file("d0/d1/d2/buried/broken.py")
+
+
+def test_depth_limit_is_not_flagged_for_shallow_repositories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("repolens.discovery.MAX_DIRECTORY_DEPTH", 64)
+    repo = tmp_path / "shallow"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "core.py").write_text("x = 1\n", encoding="utf-8")
+
+    context = discover_repository(repo, ScanConfig())
+
+    assert context.summary.skipped_by_depth_count == 0
+    assert context.summary.depth_limited is False
+    assert context.summary.is_partial is False
+
+
+def test_depth_limit_reaches_the_scan_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("repolens.discovery.MAX_DIRECTORY_DEPTH", 2)
+    repo = tmp_path / "deep-report"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    _bury(repo, 2)
+
+    report = ScanEngine().scan(repo)
+
+    assert report.discovery.skipped_by_depth_count == 1
+    assert report.discovery.is_partial is True
+
+
+def test_depth_limited_scan_is_incomplete_but_findings_still_win(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit-code policy for depth-limited discovery: 3 when clean, 1 when findings exist."""
+    from repolens.cli import EXIT_FINDINGS, EXIT_OPERATIONAL, determine_exit_code
+    from repolens.models import (
+        AnalyzerOutcome,
+        AnalyzerStatus,
+        Category,
+        Confidence,
+        Finding,
+        FindingSource,
+        Severity,
+        SourceKind,
+    )
+
+    monkeypatch.setattr("repolens.discovery.MAX_DIRECTORY_DEPTH", 1)
+    repo = tmp_path / "deep-exit"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    _bury(repo, 1)
+
+    report = ScanEngine().scan(repo)
+    assert report.discovery.skipped_by_depth_count == 1
+
+    # Nothing above the threshold: an incomplete scan must not look clean.
+    assert determine_exit_code(report, Severity.CRITICAL) == EXIT_OPERATIONAL
+
+    finding = Finding(
+        rule_id="RL-X-001",
+        category=Category.SECURITY,
+        severity=Severity.CRITICAL,
+        confidence=Confidence.HIGH,
+        title="critical issue",
+        explanation="explanation",
+        recommendation="recommendation",
+        verification="verification",
+        source=FindingSource(kind=SourceKind.DETERMINISTIC, tool="test"),
+    )
+    with_findings = report.model_copy(
+        update={
+            "findings": [finding],
+            "analyzer_outcomes": [
+                AnalyzerOutcome(analyzer_name="test", status=AnalyzerStatus.COMPLETED)
+            ],
+        }
+    )
+    assert determine_exit_code(with_findings, Severity.CRITICAL) == EXIT_FINDINGS
+
+
+# --------------------------------------------------------------------------------------
+# Other deliberate skips
+# --------------------------------------------------------------------------------------
+
+
+def test_excluded_directories_are_counted_but_do_not_make_a_scan_incomplete(
+    tmp_path: Path,
+) -> None:
+    """Convention-based exclusions (.git, node_modules, dist, ...) stay intentional."""
+    repo = tmp_path / "with-excluded"
+    (repo / "node_modules" / "pkg").mkdir(parents=True)
+    (repo / "node_modules" / "pkg" / "index.js").write_text("x\n", encoding="utf-8")
+    (repo / "dist").mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    context = discover_repository(repo, ScanConfig())
+
+    assert context.summary.skipped_excluded_count == 2
+    assert context.summary.is_partial is False
+    assert not context.has_file("node_modules/pkg/index.js")
+
+
+def test_oversized_files_are_counted_but_do_not_make_a_scan_incomplete(tmp_path: Path) -> None:
+    repo = tmp_path / "oversized"
+    repo.mkdir()
+    (repo / "big.py").write_text("x = 1\n" * 500, encoding="utf-8")
+
+    context = discover_repository(repo, ScanConfig(max_file_size_bytes=1024))
+
+    assert context.summary.skipped_oversized_count == 1
+    assert context.summary.is_partial is False
+
+
+def test_nesting_beyond_the_production_limit_is_reported(tmp_path: Path) -> None:
+    """Use the real MAX_DIRECTORY_DEPTH: no monkeypatching of the limit."""
+    repo = tmp_path / "deep-real"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    current = repo
+    # One directory per level, plus a final directory that the walker must refuse.
+    for index in range(MAX_DIRECTORY_DEPTH):
+        current = current / f"n{index}"
+    current.mkdir(parents=True)
+    (current / "unreachable").mkdir()
+    (current / "unreachable" / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+    context = discover_repository(repo, ScanConfig())
+
+    assert context.summary.skipped_by_depth_count == 1
+    assert context.summary.is_partial is True
+    assert context.has_file("app.py")
+    depth = MAX_DIRECTORY_DEPTH
+    assert not context.has_file(
+        "/".join([*(f"n{i}" for i in range(depth)), "unreachable/broken.py"])
+    )

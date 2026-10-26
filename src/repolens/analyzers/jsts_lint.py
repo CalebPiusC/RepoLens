@@ -22,6 +22,7 @@ from repolens.analyzers.tooling import (
     run_tool,
     select_config_files,
     select_source_files,
+    select_source_files_with_status,
     tool_version,
     tool_workspace,
     untrusted_config_message,
@@ -100,6 +101,7 @@ class BiomeAnalyzer(Analyzer):
 
     def __init__(self) -> None:
         self._message: str | None = None
+        self._coverage_partial = False
 
     @property
     def name(self) -> str:
@@ -114,9 +116,16 @@ class BiomeAnalyzer(Analyzer):
     def completion_message(self) -> str | None:
         return self._message
 
+    def coverage_partial(self) -> bool:
+        return self._coverage_partial
+
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
         self._message = None
-        files = select_source_files(context, _JS_TS_SUFFIXES, config.max_tool_files)
+        self._coverage_partial = False
+        files, capped = select_source_files_with_status(
+            context, _JS_TS_SUFFIXES, config.max_tool_files
+        )
+        self._coverage_partial = capped
         if not files:
             self._message = "No eligible JavaScript/TypeScript source files were found for Biome."
             return []
@@ -162,6 +171,11 @@ class BiomeAnalyzer(Analyzer):
                     break
 
         parts: list[str] = []
+        if capped:
+            parts.append(
+                f"Biome only analyzed {len(files)} file(s): the max_tool_files limit "
+                f"({config.max_tool_files}) was reached, so other files were not linted."
+            )
         config_note = untrusted_config_message(context, _BIOME_CONFIG_NAMES)
         if config_note:
             parts.append(config_note)

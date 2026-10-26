@@ -231,6 +231,9 @@ class AnalyzerOutcome(BaseModel):
     findings_count: int = Field(default=0, ge=0)
     duration_ms: float = Field(default=0.0, ge=0.0)
     message: str | None = Field(default=None, max_length=1000)
+    # True when the analyzer ran successfully but only covered part of the eligible files
+    # (for example because a per-tool file cap was reached).
+    coverage_truncated: bool = False
 
     @field_validator("message")
     @classmethod
@@ -258,6 +261,8 @@ class DiscoverySummary(BaseModel):
     # report such a scan as clean.
     unreadable_directory_count: int = Field(default=0, ge=0)
     unreadable_entry_count: int = Field(default=0, ge=0)
+    # Directories skipped because they were nested deeper than the supported walk depth.
+    skipped_by_depth_count: int = Field(default=0, ge=0)
     detected_languages: list[DetectedLanguage] = Field(default_factory=list)
 
     @property
@@ -266,12 +271,18 @@ class DiscoverySummary(BaseModel):
         return self.unreadable_directory_count > 0 or self.unreadable_entry_count > 0
 
     @property
+    def depth_limited(self) -> bool:
+        """True when a subtree was skipped for exceeding the supported nesting depth."""
+        return self.skipped_by_depth_count > 0
+
+    @property
     def is_partial(self) -> bool:
         """True when discovery stopped early or could not inspect part of the repository."""
         return (
             self.has_discovery_failures
             or self.truncated_by_file_limit
             or self.truncated_by_byte_limit
+            or self.depth_limited
         )
 
 

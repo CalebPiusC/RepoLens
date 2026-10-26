@@ -219,3 +219,30 @@ def test_entry_point_unreadable_directory_is_not_reported_clean(
     assert "could not read 1 directory" in result.stdout
     assert "cannot be reported as clean" in result.stdout
     assert "exit code 3" in result.stdout
+
+
+def test_entry_point_reports_depth_limited_scan(
+    make_python_repo: Callable[..., Path], packaged_cli_available: bool
+) -> None:
+    """A subtree beyond MAX_DIRECTORY_DEPTH must not leave the run looking clean."""
+    if not packaged_cli_available:  # pragma: no cover - environment dependent
+        pytest.skip("repolens console script is not installed in this environment")
+
+    from repolens.discovery import MAX_DIRECTORY_DEPTH
+
+    repo = make_python_repo(include_license=False)  # one MEDIUM finding
+    assert _run(["scan", str(repo), "--min-severity", "critical"]).returncode == 0
+
+    current = repo
+    for index in range(MAX_DIRECTORY_DEPTH):
+        current = current / f"n{index}"
+    current.mkdir(parents=True)
+    (current / "unreachable").mkdir()
+    (current / "unreachable" / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+    result = _run(["scan", str(repo), "--min-severity", "critical", "--color", "never"])
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "nested deeper than the supported limit" in result.stdout
+    assert "cannot be reported as clean" in result.stdout
+    assert "exit code 3" in result.stdout

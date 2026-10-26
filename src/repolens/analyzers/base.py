@@ -59,6 +59,15 @@ class Analyzer(ABC):
         """Return optional telemetry to record when the analyzer completes successfully."""
         return None
 
+    def coverage_partial(self) -> bool:
+        """Return True when the last run covered only part of the eligible repository files.
+
+        Resource limits (for example the per-tool file cap) can be hit while still
+        producing a "completed" outcome; reporting that honestly keeps a partially
+        analyzed repository from looking clean.
+        """
+        return False
+
     @abstractmethod
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
         """Run static analysis against ``context`` and return normalized findings."""
