@@ -63,6 +63,7 @@ class OsvVulnerabilityAnalyzer(Analyzer):
     def __init__(self, *, client_factory: ClientFactory | None = None) -> None:
         self._client_factory = client_factory or _default_client_factory
         self._message: str | None = None
+        self._coverage_partial = False
 
     @property
     def name(self) -> str:
@@ -88,10 +89,18 @@ class OsvVulnerabilityAnalyzer(Analyzer):
     def completion_message(self) -> str | None:
         return self._message
 
+    def coverage_partial(self) -> bool:
+        return self._coverage_partial
+
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
         self._message = None
+        self._coverage_partial = False
         inventory = self._inventory(context)
-        coordinates = inventory.unique_packages()[: config.max_osv_packages]
+        available = inventory.unique_packages()
+        coordinates = available[: config.max_osv_packages]
+        # Packages beyond the query cap are never checked for known vulnerabilities, so a
+        # clean result there would be misleading. Record it like any other coverage gap.
+        self._coverage_partial = len(available) > len(coordinates)
         if not coordinates:
             self._message = "No locked package versions were available for OSV.dev lookup."
             return []
@@ -112,10 +121,15 @@ class OsvVulnerabilityAnalyzer(Analyzer):
             raise AnalyzerExecutionError(f"OSV.dev lookup failed: {exc}") from exc
 
         findings = self._build_findings(vulnerabilities, inventory, config)
-        self._message = (
-            f"Queried OSV.dev for {len(packages)} locked package version(s); "
-            f"{len(findings)} advisory finding(s) reported."
-        )
+        queried = f"Queried OSV.dev for {len(packages)}"
+        if self._coverage_partial:
+            queried += (
+                f" of {len(available)} locked package version(s): the max_osv_packages limit "
+                f"({config.max_osv_packages}) was reached, so the rest were not checked"
+            )
+        else:
+            queried += " locked package version(s)"
+        self._message = f"{queried}; {len(findings)} advisory finding(s) reported."
         return findings
 
     def _build_findings(

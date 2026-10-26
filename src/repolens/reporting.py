@@ -382,7 +382,7 @@ def _render_notes(
         notes.append(
             paint(
                 f"Warning: {len(verdict.partial_coverage_analyzers)} analyzer(s) covered only "
-                f"part of the repository because a file limit was reached: {names}. "
+                f"part of the repository because a built-in limit was reached: {names}. "
                 "The scan is incomplete.",
                 _RED,
             )

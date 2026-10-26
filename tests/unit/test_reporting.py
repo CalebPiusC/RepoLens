@@ -562,3 +562,92 @@ def test_excluded_directories_are_disclosed_on_the_discovery_line(
 
     assert "3 dirs excluded" in output
     assert evaluate(report).is_incomplete is False
+
+
+def test_failed_analyzer_that_was_also_coverage_truncated_stays_incomplete(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    """Q3: the two signals are independent; either one makes the verdict incomplete."""
+    report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="ruff-python-lint",
+                status=AnalyzerStatus.FAILED,
+                coverage_truncated=True,
+                message="tool crashed after the file cap was hit",
+            )
+        ]
+    )
+    verdict = evaluate(report)
+
+    assert verdict.is_incomplete is True
+    assert [o.analyzer_name for o in verdict.incomplete_analyzers] == ["ruff-python-lint"]
+    # A failed run is reported as failed, not as "covered only part".
+    assert verdict.partial_coverage_analyzers == ()
+
+
+def test_timed_out_analyzer_with_coverage_flag_is_not_double_counted(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="biome-jsts-lint",
+                status=AnalyzerStatus.TIMED_OUT,
+                coverage_truncated=True,
+            )
+        ]
+    )
+    output = render_report(report, exit_code=3)
+
+    assert "1 analyzer(s) failed or timed out" in output
+    assert "covered only part of the repository" not in output
+
+
+def test_multiple_partial_analyzers_are_counted_and_named(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    """Q4: the warning count must match the number of affected analyzers."""
+    report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="ruff-python-lint",
+                status=AnalyzerStatus.COMPLETED,
+                coverage_truncated=True,
+            ),
+            AnalyzerOutcome(
+                analyzer_name="bandit-python-security",
+                status=AnalyzerStatus.COMPLETED,
+                coverage_truncated=True,
+            ),
+            AnalyzerOutcome(analyzer_name="repolens-structure", status=AnalyzerStatus.COMPLETED),
+        ]
+    )
+    output = render_report(report, exit_code=3)
+
+    assert "2 analyzer(s) covered only part of the repository" in output
+    assert "ruff-python-lint, bandit-python-security" in output
+    assert (
+        "repolens-structure" not in output.split("built-in limit was reached:")[1].splitlines()[0]
+    )
+
+
+def test_partial_coverage_with_findings_still_exits_one(
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    report = make_scan_report(
+        findings=[make_finding(severity=Severity.HIGH)],
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="ruff-python-lint",
+                status=AnalyzerStatus.COMPLETED,
+                coverage_truncated=True,
+            )
+        ],
+    )
+
+    from repolens.cli import EXIT_FINDINGS, determine_exit_code
+
+    assert determine_exit_code(report) == EXIT_FINDINGS
+    assert "but the scan is incomplete" in render_report(report, exit_code=1)
