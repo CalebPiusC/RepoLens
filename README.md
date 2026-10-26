@@ -155,10 +155,15 @@ Notes on the policy:
   the file-count or total-byte limit, when a subtree was nested deeper than the supported
   walk depth, or when an analyzer only covered part of the repository because its file limit
   was reached. An incomplete scan never exits `0`.
-- Only `unavailable` analyzers (optional tools such as Ruff, Bandit, or Biome not installed)
-  and `skipped` analyzers leave the exit code untouched, so CI is not broken by missing
-  optional tooling. They are still listed in the analyzer table with an explanatory note.
-  Install `repolens[tools]` and Biome to close those gaps.
+- An analyzer that was **never available** (an optional tool such as Ruff, Bandit, or Biome
+  is not installed) and an analyzer that was **skipped** leave the exit code untouched, so CI
+  is not broken by missing optional tooling. Both are listed in the analyzer table with an
+  explanatory note. Install `repolens[tools]` and Biome to close those gaps.
+- A check that **started but could not complete** is different: nothing it would have covered
+  was verified, so it makes the scan incomplete (exit `3`, or `1` when findings take
+  precedence). This covers a requested network check failing mid-flight and a tool
+  disappearing between the availability probe and the run:
+  `Warning: 1 check(s) started but could not complete, so results are incomplete: …`
 - Large or deeply nested repositories that hit a resource limit can raise it through the
   programmatic API (`ScanConfig(max_files=…, max_total_bytes=…, max_tool_files=…)`); the CLI
   uses the defaults (10 000 files, 50 MiB in total, 2 000 files per external tool).
@@ -320,7 +325,8 @@ What this does:
 - Sends **only** package name, version, and ecosystem (e.g. `{"name": "requests", "version": "2.31.0", "ecosystem": "PyPI"}`) to `https://api.osv.dev/v1/querybatch` and `https://api.osv.dev/v1/vulns/<id>`.
 - Never sends file paths, source code, repository names, environment variables, or credentials.
 - Enforces HTTPS only, rejects redirects, applies request timeouts, a hard response-size ceiling, batch limits (100 coordinates per request), a package cap, and an advisory cap.
-- Reports service problems explicitly instead of guessing: timeouts produce a `timed_out` outcome, connection/HTTP errors produce `unavailable`, and unreadable payloads produce `failed`.
+- Reports service problems explicitly instead of guessing: timeouts produce a `timed_out` outcome, connection/HTTP errors produce `unavailable` marked as coverage-incomplete, and unreadable payloads produce `failed`.
+- An OSV.dev failure after the lookup started is never described as a missing optional tool: because `--network-checks` was requested explicitly, the scan exits `3` instead of reporting clean.
 - Never labels a dependency vulnerable without an advisory ID returned by OSV.dev. When OSV publishes no severity, the finding is marked medium severity with low confidence, and the explanation says the rating is estimated.
 
 Disabling network checks (default) still runs every offline check. Outcome messages state why the OSV analyzer was skipped.

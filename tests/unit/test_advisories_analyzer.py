@@ -346,3 +346,58 @@ def test_findings_cap_alone_does_not_mark_coverage_partial(tmp_path: Path) -> No
 
     assert len(findings) == 2
     assert analyzer.coverage_partial() is False
+
+
+def test_network_failure_after_start_marks_coverage_incomplete(tmp_path: Path) -> None:
+    """Regression: `--network-checks` that fails mid-flight must not look like a clean run."""
+    from repolens.cli import EXIT_OPERATIONAL, determine_exit_code
+    from repolens.reporting import RenderOptions, evaluate, render_report
+
+    repo = _pinned_python_repo(tmp_path)
+    client = FakeClient(error=OsvNetworkError("OSV.dev is unreachable from this environment."))
+    report = ScanEngine(
+        config=ScanConfig(enable_network_checks=True),
+        analyzers=[OsvVulnerabilityAnalyzer(client_factory=lambda cfg: client)],
+    ).scan(repo)
+
+    outcome = report.analyzer_outcomes[0]
+    # The status stays UNAVAILABLE (Stage 2 contract); the new flag carries the difference.
+    assert outcome.status == AnalyzerStatus.UNAVAILABLE
+    assert outcome.coverage_incomplete is True
+
+    verdict = evaluate(report)
+    assert verdict.is_incomplete is True
+    assert [o.analyzer_name for o in verdict.aborted_checks] == ["osv-dependency-check"]
+    # Not described as a missing optional tool.
+    assert verdict.unavailable_analyzers == ()
+
+    assert determine_exit_code(report) == EXIT_OPERATIONAL
+
+    output = render_report(
+        report, options=RenderOptions(color=False), exit_code=determine_exit_code(report)
+    )
+    assert "started but could not complete" in output
+    assert "osv-dependency-check" in output
+    assert "optional tools are not installed" not in output
+    assert "exit code 3" in output
+
+
+def test_network_failure_with_findings_still_exits_one(tmp_path: Path) -> None:
+    """Exit-code precedence: qualifying findings outrank incomplete coverage."""
+    from repolens.cli import EXIT_FINDINGS, determine_exit_code
+    from repolens.reporting import evaluate as evaluate_incomplete
+
+    repo = _pinned_python_repo(tmp_path)
+    (repo / "LICENSE").unlink()  # guarantees a MEDIUM structure finding
+    client = FakeClient(error=OsvNetworkError("offline"))
+    report = ScanEngine(
+        config=ScanConfig(enable_network_checks=True),
+        analyzers=[
+            StructureAnalyzer(),
+            OsvVulnerabilityAnalyzer(client_factory=lambda cfg: client),
+        ],
+    ).scan(repo)
+
+    assert report.findings, "fixture must report at least one finding"
+    assert evaluate_incomplete(report).is_incomplete is True
+    assert determine_exit_code(report) == EXIT_FINDINGS

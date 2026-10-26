@@ -651,3 +651,51 @@ def test_partial_coverage_with_findings_still_exits_one(
 
     assert determine_exit_code(report) == EXIT_FINDINGS
     assert "but the scan is incomplete" in render_report(report, exit_code=1)
+
+
+def test_aborted_check_is_not_counted_as_a_missing_tool(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    """Regression: a started-then-failed check must not claim a tool is not installed."""
+    report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="osv-dependency-check",
+                status=AnalyzerStatus.UNAVAILABLE,
+                coverage_incomplete=True,
+                message="OSV.dev lookup unavailable: offline",
+            ),
+            AnalyzerOutcome(
+                analyzer_name="ruff-python-lint",
+                status=AnalyzerStatus.UNAVAILABLE,
+                message="`ruff` executable was not found on PATH.",
+            ),
+        ]
+    )
+    verdict = evaluate(report)
+
+    assert [o.analyzer_name for o in verdict.aborted_checks] == ["osv-dependency-check"]
+    assert [o.analyzer_name for o in verdict.unavailable_analyzers] == ["ruff-python-lint"]
+    assert verdict.is_incomplete is True
+
+    output = render_report(report, exit_code=3)
+    assert "1 check(s) started but could not complete" in output
+    assert "1 analyzer(s) unavailable because optional tools are not installed" in output
+    assert "ruff-python-lint" in output
+
+
+def test_aborted_check_alone_makes_the_scan_incomplete(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="osv-dependency-check",
+                status=AnalyzerStatus.UNAVAILABLE,
+                coverage_incomplete=True,
+            )
+        ]
+    )
+
+    assert evaluate(report).is_incomplete is True
+    assert evaluate(report).is_clean is False

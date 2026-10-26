@@ -135,6 +135,9 @@ class ScanEngine:
                     )
                 )
             except AnalyzerUnavailableError as exc:
+                # The probe passed (or did not apply) and the check started, then failed.
+                # Nothing it would have covered was verified, so coverage is incomplete —
+                # unlike the pre-run availability branch above, which stays exit-neutral.
                 analyzer_duration = (time.perf_counter() - analyzer_start) * 1000.0
                 outcomes.append(
                     AnalyzerOutcome(
@@ -142,6 +145,7 @@ class ScanEngine:
                         status=AnalyzerStatus.UNAVAILABLE,
                         duration_ms=analyzer_duration,
                         message=str(exc) or "Required analyzer dependency became unavailable.",
+                        coverage_incomplete=True,
                     )
                 )
             except Exception as exc:

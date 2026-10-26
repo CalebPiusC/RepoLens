@@ -90,6 +90,7 @@ class ScanVerdict:
     discovery_truncated: bool = False
     discovery_depth_limited: bool = False
     partial_coverage_analyzers: tuple[AnalyzerOutcome, ...] = ()
+    aborted_checks: tuple[AnalyzerOutcome, ...] = ()
 
     @property
     def has_findings(self) -> bool:
@@ -115,6 +116,7 @@ class ScanVerdict:
             bool(self.incomplete_analyzers)
             or self.discovery_incomplete
             or bool(self.partial_coverage_analyzers)
+            or bool(self.aborted_checks)
         )
 
     @property
@@ -156,7 +158,12 @@ def evaluate(report: ScanReport, min_severity: Severity = Severity.INFO) -> Scan
         unavailable_analyzers=tuple(
             outcome
             for outcome in report.analyzer_outcomes
-            if outcome.status is AnalyzerStatus.UNAVAILABLE
+            # Only checks that never started count as "optional tool not installed";
+            # a check that started and failed is reported as an aborted check instead.
+            if outcome.status is AnalyzerStatus.UNAVAILABLE and not outcome.coverage_incomplete
+        ),
+        aborted_checks=tuple(
+            outcome for outcome in report.analyzer_outcomes if outcome.coverage_incomplete
         ),
     )
 
@@ -291,17 +298,21 @@ def _render_analyzers(report: ScanReport, paint: _Painter) -> list[str]:
     if not report.analyzer_outcomes:
         return [paint("Analyzers", _BOLD), "  No analyzers were registered."]
 
-    rows: list[tuple[str, str, str, AnalyzerStatus]] = []
+    rows: list[tuple[str, str, str, str]] = []
     for outcome in report.analyzer_outcomes:
         detail = outcome.message or ""
         if outcome.status is AnalyzerStatus.COMPLETED:
             detail = f"{outcome.findings_count} finding(s) in {outcome.duration_ms:.0f} ms"
+        style = _STATUS_STYLES[outcome.status]
+        if outcome.coverage_incomplete:
+            # Started and failed: as serious as a failure, not a soft "not installed".
+            style = _RED
         rows.append(
             (
                 outcome.status.value,
                 _clip(outcome.analyzer_name, 30),
                 _clip(detail, _MAX_ANALYZER_MESSAGE_CHARS),
-                outcome.status,
+                style,
             )
         )
 
@@ -311,7 +322,7 @@ def _render_analyzers(report: ScanReport, paint: _Painter) -> list[str]:
     lines = [paint("Analyzers", _BOLD), _row(headers, widths)]
     for row in rows:
         cells = [
-            paint(row[0].ljust(widths[0]), _STATUS_STYLES[row[3]]),
+            paint(row[0].ljust(widths[0]), row[3]),
             row[1].ljust(widths[1]),
             row[2].ljust(widths[2]),
         ]
@@ -384,6 +395,15 @@ def _render_notes(
                 f"Warning: {len(verdict.partial_coverage_analyzers)} analyzer(s) covered only "
                 f"part of the repository because a built-in limit was reached: {names}. "
                 "The scan is incomplete.",
+                _RED,
+            )
+        )
+    if verdict.aborted_checks:
+        names = ", ".join(outcome.analyzer_name for outcome in verdict.aborted_checks)
+        notes.append(
+            paint(
+                f"Warning: {len(verdict.aborted_checks)} check(s) started but could not "
+                f"complete, so results are incomplete: {names}",
                 _RED,
             )
         )

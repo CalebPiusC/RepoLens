@@ -234,6 +234,10 @@ class AnalyzerOutcome(BaseModel):
     # True when the analyzer ran successfully but only covered part of the eligible files
     # (for example because a per-tool file cap was reached).
     coverage_truncated: bool = False
+    # True when the check was started but could not run to completion (for example a
+    # requested network lookup failed mid-flight). Unlike a tool that was never installed,
+    # nothing this check would have covered was verified, so coverage is incomplete.
+    coverage_incomplete: bool = False
 
     @field_validator("message")
     @classmethod

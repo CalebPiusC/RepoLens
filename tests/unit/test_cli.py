@@ -824,3 +824,73 @@ def test_real_depth_limited_scan_exits_three(
     out = capsys.readouterr().out
     assert exit_code == EXIT_OPERATIONAL
     assert "nested deeper than the supported limit" in out
+
+
+def test_missing_optional_tool_stays_exit_neutral(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A tool that was never installed is disclosed but does not fail the run."""
+    fake_engine.report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="ruff-python-lint",
+                status=AnalyzerStatus.UNAVAILABLE,
+                coverage_incomplete=False,
+                message="`ruff` executable was not found on PATH (optional tool not installed).",
+            )
+        ]
+    )
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "optional tools are not installed" in out
+    assert "started but could not complete" not in out
+    assert "exit code 0" in out
+
+
+def test_check_that_started_then_failed_exits_three(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A requested network check that started and failed is incomplete coverage, not a skip."""
+    fake_engine.report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="osv-dependency-check",
+                status=AnalyzerStatus.UNAVAILABLE,
+                coverage_incomplete=True,
+                message="OSV.dev lookup unavailable: OSV.dev is unreachable.",
+            )
+        ]
+    )
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OPERATIONAL
+
+    out = capsys.readouterr().out
+    assert "1 check(s) started but could not complete" in out
+    assert "osv-dependency-check" in out
+    assert "optional tools are not installed" not in out
+    assert "exit code 3" in out
+
+
+def test_started_check_failure_with_findings_exits_one(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    fake_engine.report = make_scan_report(
+        findings=[make_finding(severity=Severity.HIGH)],
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="osv-dependency-check",
+                status=AnalyzerStatus.UNAVAILABLE,
+                coverage_incomplete=True,
+            )
+        ],
+    )
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
