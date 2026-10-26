@@ -24,6 +24,7 @@ from repolens.analyzers.tooling import (
     resolve_tool,
     run_tool,
     select_source_files,
+    select_source_files_with_status,
     tool_workspace,
     untrusted_config_message,
 )
@@ -213,3 +214,22 @@ def test_tool_probe_never_executes_repository_commands(
     probe_tool("probe-tool")
     assert not marker.exists()
     assert os.environ.get("PATH", "").startswith(str(tmp_path / "fake-bin"))
+
+
+def test_select_source_files_with_status_reports_the_limit(tmp_path: Path) -> None:
+    repo = tmp_path / "many"
+    repo.mkdir()
+    for index in range(3):
+        (repo / f"m{index}.py").write_text("x = 1\n", encoding="utf-8")
+    context = discover_repository(repo, ScanConfig())
+
+    exactly, exact_truncated = select_source_files_with_status(context, frozenset({".py"}), limit=3)
+    assert len(exactly) == 3
+    assert exact_truncated is False
+
+    capped, truncated = select_source_files_with_status(context, frozenset({".py"}), limit=2)
+    assert len(capped) == 2
+    assert truncated is True
+
+    # The backwards-compatible wrapper keeps the same selection.
+    assert select_source_files(context, frozenset({".py"}), limit=2) == capped

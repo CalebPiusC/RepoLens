@@ -121,6 +121,21 @@ def select_source_files(
     limit: int,
 ) -> list[str]:
     """Return deterministic, safely discovered, non-ignored source files for tool input."""
+    files, _ = select_source_files_with_status(context, suffixes, limit)
+    return files
+
+
+def select_source_files_with_status(
+    context: RepositoryContext,
+    suffixes: frozenset[str],
+    limit: int,
+) -> tuple[list[str], bool]:
+    """Like :func:`select_source_files`, but also report whether ``limit`` was hit.
+
+    The second element is ``True`` when more eligible files exist than the analyzer is
+    allowed to hand to an external tool, which means the tool's verdict covers only part
+    of the repository. Callers must surface that instead of silently reporting a pass.
+    """
     selected: list[str] = []
     for item in context.files:
         if item.is_sensitive or item.is_oversized:
@@ -131,8 +146,24 @@ def select_source_files(
             continue
         selected.append(item.path)
         if len(selected) >= limit:
-            break
-    return selected
+            return selected, _has_more_eligible(context, suffixes, limit)
+    return selected, False
+
+
+def _has_more_eligible(context: RepositoryContext, suffixes: frozenset[str], limit: int) -> bool:
+    """Return True when at least one further eligible file exists beyond ``limit``."""
+    eligible = 0
+    for item in context.files:
+        if item.is_sensitive or item.is_oversized:
+            continue
+        if PurePosixPath(item.path).suffix.lower() not in suffixes:
+            continue
+        if context.has_gitignore and context.gitignore.is_ignored(item.path, is_dir=False):
+            continue
+        eligible += 1
+        if eligible > limit:
+            return True
+    return False
 
 
 def select_config_files(

@@ -260,3 +260,144 @@ def test_analyze_without_coordinates_reports_message(tmp_path: Path) -> None:
     analyzer = OsvVulnerabilityAnalyzer(client_factory=lambda cfg: FakeClient())
     assert analyzer.analyze(context, ScanConfig(enable_network_checks=True)) == []
     assert "No locked package versions" in (analyzer.completion_message() or "")
+
+
+def test_package_cap_is_reported_as_partial_coverage(tmp_path: Path) -> None:
+    """Packages beyond max_osv_packages are unchecked, so the run must not look complete."""
+    repo = _pinned_python_repo(tmp_path)
+    (repo / "requirements.txt").write_text(
+        "requests==2.31.0\nurllib3==2.2.1\nidna==3.7\n", encoding="utf-8"
+    )
+    client = FakeClient()
+    analyzer = OsvVulnerabilityAnalyzer(client_factory=lambda cfg: client)
+
+    from repolens.discovery import discover_repository
+
+    context = discover_repository(repo, ScanConfig())
+    findings = analyzer.analyze(context, ScanConfig(enable_network_checks=True, max_osv_packages=1))
+
+    assert findings == []
+    assert len(client.received) == 1
+    assert analyzer.coverage_partial() is True
+    message = analyzer.completion_message() or ""
+    assert "1 of 3 locked package version(s)" in message
+    assert "max_osv_packages" in message
+    assert "not checked" in message
+
+
+def test_package_cap_not_flagged_when_every_package_fits(tmp_path: Path) -> None:
+    repo = _pinned_python_repo(tmp_path)
+    client = FakeClient()
+    analyzer = OsvVulnerabilityAnalyzer(client_factory=lambda cfg: client)
+
+    from repolens.discovery import discover_repository
+
+    context = discover_repository(repo, ScanConfig())
+    analyzer.analyze(context, ScanConfig(enable_network_checks=True))
+
+    assert analyzer.coverage_partial() is False
+    assert "not checked" not in (analyzer.completion_message() or "")
+
+
+def test_package_cap_makes_the_scan_incomplete_end_to_end(tmp_path: Path) -> None:
+    """Regression: a vulnerability past the 300-package cap used to yield exit code 0."""
+    from repolens.cli import EXIT_OPERATIONAL, determine_exit_code
+    from repolens.reporting import evaluate
+
+    repo = _pinned_python_repo(tmp_path)
+    (repo / "requirements.txt").write_text(
+        "requests==2.31.0\nurllib3==2.2.1\nidna==3.7\n", encoding="utf-8"
+    )
+    client = FakeClient()
+    report = ScanEngine(
+        config=ScanConfig(enable_network_checks=True, max_osv_packages=1),
+        analyzers=[OsvVulnerabilityAnalyzer(client_factory=lambda cfg: client)],
+    ).scan(repo)
+
+    outcome = report.analyzer_outcomes[0]
+    assert outcome.status == AnalyzerStatus.COMPLETED
+    assert outcome.coverage_truncated is True
+    assert evaluate(report).is_incomplete is True
+    assert determine_exit_code(report) == EXIT_OPERATIONAL
+
+
+def test_findings_cap_alone_does_not_mark_coverage_partial(tmp_path: Path) -> None:
+    """Dropping surplus *findings* never hides coverage: findings still force exit 1."""
+    repo = _pinned_python_repo(tmp_path)
+    vulnerabilities = [
+        OsvVulnerability(
+            vuln_id=f"GHSA-test-{index:04d}",
+            package=OsvPackage(name="requests", version="2.31.0", ecosystem="PyPI"),
+            summary="Advisory",
+            severity=Severity.MEDIUM,
+            confidence=Confidence.HIGH,
+        )
+        for index in range(3)
+    ]
+    client = FakeClient(vulnerabilities=vulnerabilities)
+    analyzer = OsvVulnerabilityAnalyzer(client_factory=lambda cfg: client)
+
+    from repolens.discovery import discover_repository
+
+    context = discover_repository(repo, ScanConfig())
+    findings = analyzer.analyze(
+        context, ScanConfig(enable_network_checks=True, max_findings_per_analyzer=2)
+    )
+
+    assert len(findings) == 2
+    assert analyzer.coverage_partial() is False
+
+
+def test_network_failure_after_start_marks_coverage_incomplete(tmp_path: Path) -> None:
+    """Regression: `--network-checks` that fails mid-flight must not look like a clean run."""
+    from repolens.cli import EXIT_OPERATIONAL, determine_exit_code
+    from repolens.reporting import RenderOptions, evaluate, render_report
+
+    repo = _pinned_python_repo(tmp_path)
+    client = FakeClient(error=OsvNetworkError("OSV.dev is unreachable from this environment."))
+    report = ScanEngine(
+        config=ScanConfig(enable_network_checks=True),
+        analyzers=[OsvVulnerabilityAnalyzer(client_factory=lambda cfg: client)],
+    ).scan(repo)
+
+    outcome = report.analyzer_outcomes[0]
+    # The status stays UNAVAILABLE (Stage 2 contract); the new flag carries the difference.
+    assert outcome.status == AnalyzerStatus.UNAVAILABLE
+    assert outcome.coverage_incomplete is True
+
+    verdict = evaluate(report)
+    assert verdict.is_incomplete is True
+    assert [o.analyzer_name for o in verdict.aborted_checks] == ["osv-dependency-check"]
+    # Not described as a missing optional tool.
+    assert verdict.unavailable_analyzers == ()
+
+    assert determine_exit_code(report) == EXIT_OPERATIONAL
+
+    output = render_report(
+        report, options=RenderOptions(color=False), exit_code=determine_exit_code(report)
+    )
+    assert "started but could not complete" in output
+    assert "osv-dependency-check" in output
+    assert "optional tools are not installed" not in output
+    assert "exit code 3" in output
+
+
+def test_network_failure_with_findings_still_exits_one(tmp_path: Path) -> None:
+    """Exit-code precedence: qualifying findings outrank incomplete coverage."""
+    from repolens.cli import EXIT_FINDINGS, determine_exit_code
+    from repolens.reporting import evaluate as evaluate_incomplete
+
+    repo = _pinned_python_repo(tmp_path)
+    (repo / "LICENSE").unlink()  # guarantees a MEDIUM structure finding
+    client = FakeClient(error=OsvNetworkError("offline"))
+    report = ScanEngine(
+        config=ScanConfig(enable_network_checks=True),
+        analyzers=[
+            StructureAnalyzer(),
+            OsvVulnerabilityAnalyzer(client_factory=lambda cfg: client),
+        ],
+    ).scan(repo)
+
+    assert report.findings, "fixture must report at least one finding"
+    assert evaluate_incomplete(report).is_incomplete is True
+    assert determine_exit_code(report) == EXIT_FINDINGS

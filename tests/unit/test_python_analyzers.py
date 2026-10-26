@@ -374,3 +374,49 @@ def test_analyzers_report_when_no_eligible_files_remain(
     assert bandit.analyze(context, ScanConfig()) == []
     assert "No eligible Python source files" in (bandit.completion_message() or "")
     assert recorder.calls == []
+
+
+def test_ruff_file_cap_is_reported_as_partial_coverage(
+    make_python_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruff linting only the first N files must not look like a complete clean pass."""
+    repo = make_python_repo()
+    recorder = RunRecorder([_result("[]")])
+    monkeypatch.setattr("repolens.analyzers.python_lint.run_tool", recorder)
+
+    analyzer = RuffAnalyzer()
+    findings = analyzer.analyze(
+        discover_repository(repo, ScanConfig()), ScanConfig(max_tool_files=1)
+    )
+
+    assert findings == []
+    assert analyzer.coverage_partial() is True
+    message = analyzer.completion_message() or ""
+    assert "only analyzed 1 Python file(s)" in message
+    assert "max_tool_files" in message
+
+
+def test_ruff_within_the_file_cap_is_not_partial(
+    make_python_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_python_repo()
+    monkeypatch.setattr("repolens.analyzers.python_lint.run_tool", RunRecorder([_result("[]")]))
+
+    analyzer = RuffAnalyzer()
+    analyzer.analyze(discover_repository(repo, ScanConfig()), ScanConfig())
+
+    assert analyzer.coverage_partial() is False
+    assert "only analyzed" not in (analyzer.completion_message() or "")
+
+
+def test_bandit_file_cap_is_reported_as_partial_coverage(
+    make_python_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_python_repo()
+    monkeypatch.setattr("repolens.analyzers.python_lint.run_tool", RunRecorder([_result("{}")]))
+
+    analyzer = BanditAnalyzer()
+    analyzer.analyze(discover_repository(repo, ScanConfig()), ScanConfig(max_tool_files=1))
+
+    assert analyzer.coverage_partial() is True
+    assert "max_tool_files" in (analyzer.completion_message() or "")
