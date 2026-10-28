@@ -30,11 +30,11 @@ _ALLOWED_ENV_KEYS: tuple[str, ...] = (
     "PATHEXT",
 )
 
-# Windows has no process sessions: a tool launched from a ``.cmd`` shim runs under
+# Windows has no process sessions: a tool launched through a ``.cmd`` shim runs under
 # ``cmd.exe``, so terminating only the direct child would leave the real analyzer alive.
-# A dedicated process group plus ``taskkill /T`` lets RepoLens stop the whole tree.
-# Win32 flags; ``subprocess`` only exposes them on Windows builds, so they are spelled out
-# here to keep the module importable and type-checkable on every platform.
+# A dedicated process group plus ``taskkill /T`` lets RepoLens stop the whole tree. The
+# flags are spelled out because ``subprocess`` only exposes them on Windows builds, which
+# would otherwise break importing and type checking on other platforms.
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_NO_WINDOW = 0x08000000
 _CREATION_FLAGS: int = _CREATE_NEW_PROCESS_GROUP | _CREATE_NO_WINDOW if os.name == "nt" else 0
