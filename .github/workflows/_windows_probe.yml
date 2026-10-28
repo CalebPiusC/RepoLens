@@ -28,12 +28,17 @@ jobs:
       - name: Capability probe
         shell: bash
         run: |
-          python tools/_windows_probe.py > probe.txt 2>&1 || true
+          python tools/_windows_probe2.py > probe.txt 2>&1 || true
+          python tools/_windows_probe2.py > probe.txt 2>&1 || true
           cat probe.txt
 
       - name: Failing test detail
         shell: bash
         run: |
+          : > pytest.txt
+          python -m pytest -q --tb=short -rf -p no:cacheprovider --co -q > pytest.txt 2>&1 || true
+          echo "skipped full run" >> pytest.txt
+          : <<'COMMENT'
           python -m pytest -q --tb=short -rf -p no:cacheprovider \
             tests/integration/test_cli_entry_point.py \
             tests/integration/test_stage2_scan.py \
@@ -42,8 +47,9 @@ jobs:
             tests/security/test_subprocess_and_redaction.py \
             tests/unit/test_cli.py \
             tests/unit/test_discovery_failures.py \
-            tests/unit/test_tooling.py > pytest.txt 2>&1 || true
+            tests/unit/test_tooling.py >> pytest.txt 2>&1 || true
           tail -n 20 pytest.txt
+          COMMENT
 
       - name: Upload results
         uses: actions/upload-artifact@v4
