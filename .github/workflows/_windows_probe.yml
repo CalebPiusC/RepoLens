@@ -34,7 +34,7 @@ jobs:
       - name: Failing test detail
         shell: bash
         run: |
-          python -m pytest -q --tb=long -rf \
+          python -m pytest -q --tb=short -rf -p no:cacheprovider \
             tests/integration/test_cli_entry_point.py \
             tests/integration/test_stage2_scan.py \
             tests/security/test_discovery_safety.py \
@@ -43,7 +43,7 @@ jobs:
             tests/unit/test_cli.py \
             tests/unit/test_discovery_failures.py \
             tests/unit/test_tooling.py > pytest.txt 2>&1 || true
-          cat pytest.txt
+          tail -n 20 pytest.txt
 
       - name: Upload results
         uses: actions/upload-artifact@v4
@@ -63,20 +63,37 @@ jobs:
           python - <<'PY'
           import os
           import subprocess
+          import traceback
 
           pr = os.environ["PR_NUMBER"]
+          repo = os.environ["GITHUB_REPOSITORY"]
           for filename in ("probe.txt", "pytest.txt"):
               try:
-                  text = open(filename, encoding="utf-8", errors="replace").read()
-              except OSError:
+                  with open(filename, encoding="utf-8", errors="replace") as handle:
+                      text = handle.read()
+              except OSError as exc:
+                  print(f"missing {filename}: {exc}")
                   continue
-              chunk = 55000
+              chunk = 38000
               pieces = [text[i : i + chunk] for i in range(0, len(text), chunk)] or [""]
+              print(f"{filename}: {len(text)} chars in {len(pieces)} part(s)")
               for index, piece in enumerate(pieces, start=1):
                   body = f"PROBE-RESULT {filename} part {index}/{len(pieces)}\n\n```\n{piece}\n```"
-                  subprocess.run(
-                      ["gh", "api", "-X", "POST", f"repos/{os.environ['GITHUB_REPOSITORY']}/issues/{pr}/comments",
-                       "-f", f"body={body}"],
-                      check=True,
-                  )
+                  with open("comment_body.txt", "w", encoding="utf-8") as handle:
+                      handle.write(body)
+                  try:
+                      subprocess.run(
+                          [
+                              "gh",
+                              "api",
+                              "-X",
+                              "POST",
+                              f"repos/{repo}/issues/{pr}/comments",
+                              "-F",
+                              "body=@comment_body.txt",
+                          ],
+                          check=True,
+                      )
+                  except Exception:  # noqa: BLE001
+                      traceback.print_exc()
           PY
