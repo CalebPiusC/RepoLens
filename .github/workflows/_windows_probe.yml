@@ -103,3 +103,38 @@ jobs:
                   except Exception:  # noqa: BLE001
                       traceback.print_exc()
           PY
+
+  ubuntu-repro:
+    name: Ubuntu repro
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Pytest
+        shell: bash
+        run: |
+          python -m pytest --cov=repolens --cov-report=term-missing -q > pytest.txt 2>&1 || true
+          tail -n 40 pytest.txt
+      - name: Publish
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          text = open("pytest.txt", encoding="utf-8", errors="replace").read()[-30000:]
+          body = "PROBE-RESULT ubuntu-pytest\n\n```\n" + text + "\n```"
+          open("comment_body.txt", "w", encoding="utf-8").write(body)
+          subprocess.run(["gh", "api", "-X", "POST",
+                          f"repos/{os.environ['GITHUB_REPOSITORY']}/issues/{os.environ['PR_NUMBER']}/comments",
+                          "-F", "body=@comment_body.txt"], check=False)
+          PY
