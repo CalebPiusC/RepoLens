@@ -35,7 +35,7 @@ from repolens.discovery import discover_repository
 def test_probe_tool_detects_executable_and_version(
     install_fake_tool: Callable[..., Path],
 ) -> None:
-    install_fake_tool("ruff", 'if [ "$1" = "--version" ]; then echo "ruff 0.9.7"; fi')
+    install_fake_tool("ruff", "pass\n", version="ruff 0.9.7")
 
     availability = probe_tool("ruff")
     assert availability.available is True
@@ -66,7 +66,7 @@ def test_probe_tool_rejects_invalid_name() -> None:
 def test_probe_tool_tolerates_version_failure(
     install_fake_tool: Callable[..., Path],
 ) -> None:
-    install_fake_tool("odd-tool", "exit 3")
+    install_fake_tool("odd-tool", "raise SystemExit(3)\n")
     availability = probe_tool("odd-tool")
     assert availability.available is True
     assert availability.version is None
@@ -86,7 +86,7 @@ def test_run_tool_requires_available_executable(tmp_path: Path) -> None:
 def test_run_tool_maps_timeout_to_analyzer_timeout(
     install_fake_tool: Callable[..., Path],
 ) -> None:
-    install_fake_tool("sleepy-tool", "sleep 30")
+    install_fake_tool("sleepy-tool", "time.sleep(30)\n")
     with tool_workspace() as workspace, pytest.raises(AnalyzerTimeoutError, match="exceeded"):
         run_tool(
             "sleepy-tool",
@@ -101,7 +101,10 @@ def test_run_tool_passes_structured_arguments(
     install_fake_tool: Callable[..., Path], tmp_path: Path
 ) -> None:
     marker = tmp_path / "args.txt"
-    install_fake_tool("echo-tool", f'printf "%s\\n" "$@" > {marker}')
+    install_fake_tool(
+        "echo-tool",
+        f"Path({str(marker)!r}).write_text('\\n'.join(_args) + '\\n', encoding='utf-8')\n",
+    )
     with tool_workspace() as workspace:
         result = run_tool(
             "echo-tool",
@@ -210,7 +213,7 @@ def test_tool_probe_never_executes_repository_commands(
 ) -> None:
     marker = tmp_path / "marker"
     (tmp_path / "setup.py").write_text(f"open({str(marker)!r}, 'w').write('x')\n")
-    install_fake_tool("probe-tool", 'if [ "$1" = "--version" ]; then echo "1.2.3"; fi')
+    install_fake_tool("probe-tool", "pass\n", version="1.2.3")
     probe_tool("probe-tool")
     assert not marker.exists()
     assert os.environ.get("PATH", "").startswith(str(tmp_path / "fake-bin"))

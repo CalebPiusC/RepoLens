@@ -30,6 +30,15 @@ _ALLOWED_ENV_KEYS: tuple[str, ...] = (
     "PATHEXT",
 )
 
+# Windows has no process sessions: a tool launched from a ``.cmd`` shim runs under
+# ``cmd.exe``, so terminating only the direct child would leave the real analyzer alive.
+# A dedicated process group plus ``taskkill /T`` lets RepoLens stop the whole tree.
+# Win32 flags; ``subprocess`` only exposes them on Windows builds, so they are spelled out
+# here to keep the module importable and type-checkable on every platform.
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_NO_WINDOW = 0x08000000
+_CREATION_FLAGS: int = _CREATE_NEW_PROCESS_GROUP | _CREATE_NO_WINDOW if os.name == "nt" else 0
+
 _FORCED_SAFE_ENV: dict[str, str] = {
     "CI": "1",
     "NO_COLOR": "1",
@@ -107,9 +116,32 @@ def _read_bounded_stream(
         stream.close()
 
 
+def _terminate_windows_process_tree(proc: subprocess.Popen[bytes]) -> None:
+    """Terminate ``proc`` and its descendants with ``taskkill``, falling back to ``kill``."""
+    taskkill = shutil.which("taskkill")
+    if taskkill is not None:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                [taskkill, "/F", "/T", "/PID", str(proc.pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5.0,
+                check=False,
+            )
+    with contextlib.suppress(OSError):
+        proc.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=1.0)
+
+
 def _terminate_process_tree(proc: subprocess.Popen[bytes]) -> None:
-    """Terminate a timed-out process and any child processes in its session."""
+    """Terminate a timed-out process and any child processes it started."""
     if proc.poll() is not None:
+        return
+
+    if os.name == "nt":  # pragma: no cover - exercised on Windows CI only
+        _terminate_windows_process_tree(proc)
         return
 
     killpg_available = hasattr(os, "killpg")
@@ -190,6 +222,7 @@ def run_safe_command(
         stderr=subprocess.PIPE,
         shell=False,
         start_new_session=True,
+        creationflags=_CREATION_FLAGS,
     )
 
     stdout_chunks: list[bytes] = []

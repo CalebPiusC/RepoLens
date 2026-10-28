@@ -64,23 +64,10 @@ def _hostile_repo(root: Path, markers_dir: Path) -> Path:
 
 def _install_noop_tools(install_fake_tool: Callable[..., Path], log: Path | None = None) -> None:
     """Install stub ruff/bandit/biome executables that never touch the repository."""
-    logger = f'printf "%s\\n" "$@" >> {log}' if log is not None else "true"
-    install_fake_tool(
-        "ruff",
-        f'if [ "$1" = "--version" ]; then echo "ruff 0.9.7"; exit 0; fi\n{logger}\necho "[]"',
-    )
-    install_fake_tool(
-        "bandit",
-        'if [ "$1" = "--version" ]; then echo "bandit 1.9.0"; exit 0; fi\n'
-        f"{logger}\n"
-        "echo '{\"results\": []}'",
-    )
-    install_fake_tool(
-        "biome",
-        'if [ "$1" = "--version" ]; then echo "Version: 2.6.3"; exit 0; fi\n'
-        f"{logger}\n"
-        "echo '{\"diagnostics\": []}'",
-    )
+    logger = f"append_args({str(log)!r})\n" if log is not None else ""
+    install_fake_tool("ruff", f"{logger}emit([])\n", version="ruff 0.9.7")
+    install_fake_tool("bandit", f'{logger}emit({{"results": []}})\n', version="bandit 1.9.0")
+    install_fake_tool("biome", f'{logger}emit({{"diagnostics": []}})\n', version="Version: 2.6.3")
 
 
 def _snapshot(root: Path) -> set[str]:
@@ -165,13 +152,17 @@ def test_repository_tool_configuration_is_never_loaded(
 
 
 def test_symlinked_files_are_never_passed_to_external_tools(
-    tmp_path: Path, install_fake_tool: Callable[..., Path]
+    tmp_path: Path,
+    install_fake_tool: Callable[..., Path],
+    make_symlink: Callable[..., Path],
 ) -> None:
     arg_log = tmp_path / "args.log"
     repo = tmp_path / "symlinked"
     repo.mkdir()
     _write(repo, "app.py", "x = 1\n")
-    (repo / "link.py").symlink_to("/etc/hostname")
+    outside = tmp_path / "outside_app.py"
+    outside.write_text("x = 1\n", encoding="utf-8")
+    make_symlink(repo / "link.py", outside)
     _install_noop_tools(install_fake_tool, log=arg_log)
 
     ScanEngine().scan(repo)
@@ -187,8 +178,8 @@ def test_tool_secrets_never_reach_report_messages(
     token = "ghp_" + "D" * 32
     install_fake_tool(
         "ruff",
-        'if [ "$1" = "--version" ]; then echo "ruff 0.9.7"; exit 0; fi\n'
-        f'echo "fatal: leaked {token}" >&2\nexit 2',
+        f'sys.stderr.write("fatal: leaked {token}\\n")\nraise SystemExit(2)\n',
+        version="ruff 0.9.7",
     )
     repo = tmp_path / "leaky"
     repo.mkdir()
@@ -208,8 +199,8 @@ def test_truncated_tool_output_is_reported_without_crashing(
 ) -> None:
     install_fake_tool(
         "ruff",
-        'if [ "$1" = "--version" ]; then echo "ruff 0.9.7"; exit 0; fi\n'
-        'i=0\nwhile [ $i -lt 400 ]; do printf "[{\\"code\\": \\"F401\\""; i=$((i+1)); done',
+        'sys.stdout.write(\'[{"code": "F401"\' * 400)\n',
+        version="ruff 0.9.7",
     )
     repo = tmp_path / "noisy"
     repo.mkdir()
@@ -289,9 +280,11 @@ def test_sanitized_environment_is_used_for_tool_invocations(
     env_log = tmp_path / "env.log"
     install_fake_tool(
         "ruff",
-        'if [ "$1" = "--version" ]; then echo "ruff 0.9.7"; exit 0; fi\n'
-        f'env | grep -E "GEMINI_API_KEY|GITHUB_TOKEN" > {env_log} || true\n'
-        'echo "[]"',
+        f"Path({str(env_log)!r}).write_text("
+        "'\\n'.join(key for key in ('GEMINI_API_KEY', 'GITHUB_TOKEN') if key in os.environ), "
+        "encoding='utf-8')\n"
+        "emit([])\n",
+        version="ruff 0.9.7",
     )
     repo = tmp_path / "env"
     repo.mkdir()

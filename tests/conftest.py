@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import stat
+import sys
+import tempfile
+import textwrap
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,8 +50,9 @@ def make_python_repo(tmp_path: Path) -> Callable[..., Path]:
         include_gitignore: bool = True,
         include_pyproject: bool = True,
         include_tests: bool = True,
+        base_dir: Path | None = None,
     ) -> Path:
-        root = tmp_path / name
+        root = (base_dir or tmp_path) / name
         root.mkdir(parents=True, exist_ok=True)
 
         if include_license:
@@ -142,27 +148,143 @@ def make_jsts_repo(tmp_path: Path) -> Callable[..., Path]:
     return _create
 
 
+_STUB_PREAMBLE = """\
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+_args = sys.argv[1:]
+
+
+def emit(payload: object) -> None:
+    \"\"\"Write ``payload`` as one JSON document, like a real analyzer does.\"\"\"
+    print(json.dumps(payload))
+
+
+def append_args(path: str) -> None:
+    \"\"\"Append every received argument to ``path``, one per line, unmodified.\"\"\"
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("\\n".join(_args) + "\\n")
+"""
+
+
+def _write_tool_launcher(bin_dir: Path, name: str, implementation: Path) -> Path:
+    """Create a launcher named ``name`` that runs ``implementation`` with ``sys.executable``.
+
+    Windows resolves executables through ``PATHEXT`` and has no shebang support, so the
+    stub is a ``.cmd`` wrapper there and a POSIX shell wrapper elsewhere. Both forward the
+    arguments verbatim, which keeps the argument-passing tests meaningful on every platform.
+    """
+    if os.name == "nt":  # pragma: no cover - exercised on Windows CI only
+        launcher = bin_dir / f"{name}.cmd"
+        launcher.write_text(
+            f'@echo off\r\n"{sys.executable}" "{implementation}" %*\r\n',
+            encoding="utf-8",
+        )
+        return launcher
+
+    launcher = bin_dir / name
+    launcher.write_text(
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(implementation))} "$@"\n',
+        encoding="utf-8",
+    )
+    launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return launcher
+
+
 @pytest.fixture
 def install_fake_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Path]:
     """Install a stub executable on a temporary PATH and invalidate probe caches.
 
     The stub lets tests exercise the real subprocess execution path without requiring
-    Ruff, Bandit, or Biome to be installed on the test machine.
+    Ruff, Bandit, or Biome to be installed on the test machine. ``script`` is Python source
+    executed by the stub launcher, so the same stub runs on POSIX and Windows; it may use
+    the ``_args`` argument list and the ``emit``/``append_args`` helpers.
     """
 
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    def _install(name: str, script: str) -> Path:
-        path = bin_dir / name
-        path.write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
-        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    def _install(name: str, script: str, *, version: str | None = None) -> Path:
+        version_guard = (
+            f"_VERSION = {version!r}\n"
+            'if _VERSION is not None and _args[:1] == ["--version"]:\n'
+            "    print(_VERSION)\n"
+            "    raise SystemExit(0)\n"
+            if version is not None
+            else ""
+        )
+        implementation = bin_dir / f"{name}-stub.py"
+        implementation.write_text(
+            f"{_STUB_PREAMBLE}\n{version_guard}{textwrap.dedent(script).strip()}\n",
+            encoding="utf-8",
+        )
+        launcher = _write_tool_launcher(bin_dir, name, implementation)
         current = os.environ.get("PATH", "")
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{current}")
         clear_tool_cache()
-        return path
+        return launcher
 
     return _install
+
+
+@pytest.fixture
+def make_symlink() -> Callable[..., Path]:
+    """Create a symbolic link, skipping the test where the OS forbids unprivileged links.
+
+    An unprivileged Windows account can only create symbolic links when Developer Mode is
+    enabled, so the symlink-boundary tests are skipped there instead of failing.
+    """
+
+    def _create(link: Path, target: Path, *, target_is_directory: bool = False) -> Path:
+        try:
+            link.symlink_to(target, target_is_directory=target_is_directory)
+        except (OSError, NotImplementedError) as exc:  # pragma: no cover - platform dependent
+            pytest.skip(f"this environment cannot create symbolic links: {exc}")
+        return link
+
+    return _create
+
+
+@pytest.fixture
+def short_root() -> Iterator[Path]:
+    """Yield a scratch repository root whose absolute path is deliberately short.
+
+    Windows enforces a ~260 character path limit when long-path support is disabled. Nesting
+    dozens of directories below pytest's own (long) ``tmp_path`` would hit that limit before
+    the discovery depth limit is reached, so depth tests start from the system temp directory.
+    """
+    raw = Path(tempfile.mkdtemp(prefix="rl-"))
+    try:
+        yield raw
+    finally:
+        shutil.rmtree(raw, ignore_errors=True)
+
+
+@pytest.fixture
+def make_nested_directories() -> Callable[..., Path]:
+    """Nest one-character directories below ``root``, skipping if the OS refuses.
+
+    Reusing a single-character name keeps the absolute path short enough for filesystems
+    without long-path support; uniqueness is only required between siblings.
+    """
+
+    def _create(root: Path, depth: int, *, leaf: Sequence[str] = ()) -> Path:
+        current = root
+        try:
+            for _ in range(depth):
+                current = current / "d"
+                current.mkdir(parents=True, exist_ok=True)
+            for name in leaf:
+                current = current / name
+                current.mkdir()
+        except OSError as exc:  # pragma: no cover - platform dependent
+            pytest.skip(f"the filesystem cannot represent {depth} nested directories: {exc}")
+        return current
+
+    return _create
 
 
 @pytest.fixture

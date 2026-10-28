@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -101,7 +102,9 @@ def test_subprocess_runner_caps_runaway_output(tmp_path: Path) -> None:
     assert len(result.stdout.encode("utf-8")) == 4096
 
 
-def test_subprocess_runner_rejects_shell_strings_and_unsafe_cwd(tmp_path: Path) -> None:
+def test_subprocess_runner_rejects_shell_strings_and_unsafe_cwd(
+    tmp_path: Path, make_symlink: Callable[..., Path]
+) -> None:
     with pytest.raises(SubprocessExecutionError, match="sequence"):
         run_safe_command("echo unsafe", cwd=tmp_path)
 
@@ -114,6 +117,6 @@ def test_subprocess_runner_rejects_shell_strings_and_unsafe_cwd(tmp_path: Path) 
     link_dir = tmp_path / "symlink_cwd"
     real_dir = tmp_path / "real"
     real_dir.mkdir()
-    link_dir.symlink_to(real_dir)
+    make_symlink(link_dir, real_dir, target_is_directory=True)
     with pytest.raises(SubprocessExecutionError, match="working directory"):
         run_safe_command([sys.executable, "-c", "pass"], cwd=link_dir)

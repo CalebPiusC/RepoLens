@@ -20,6 +20,7 @@ from repolens.exceptions import (
 def test_symlink_escape_files_and_dirs_are_never_followed(
     tmp_path: Path,
     make_python_repo: Callable[..., Path],
+    make_symlink: Callable[..., Path],
 ) -> None:
     outside_dir = tmp_path / "outside_secrets"
     outside_dir.mkdir()
@@ -27,8 +28,8 @@ def test_symlink_escape_files_and_dirs_are_never_followed(
     outside_secret.write_text("root:x:0:0:root:/root:/bin/bash\n", encoding="utf-8")
 
     repo = make_python_repo()
-    (repo / "escaped_file.py").symlink_to(outside_secret)
-    (repo / "escaped_dir").symlink_to(outside_dir)
+    make_symlink(repo / "escaped_file.py", outside_secret)
+    make_symlink(repo / "escaped_dir", outside_dir, target_is_directory=True)
 
     context = discover_repository(repo)
     assert context.summary.skipped_symlink_count == 2
@@ -43,10 +44,10 @@ def test_symlink_escape_files_and_dirs_are_never_followed(
 def test_symlink_repository_root_is_rejected(
     tmp_path: Path,
     make_python_repo: Callable[..., Path],
+    make_symlink: Callable[..., Path],
 ) -> None:
     real_repo = make_python_repo()
-    symlink_root = tmp_path / "repo_link"
-    symlink_root.symlink_to(real_repo)
+    symlink_root = make_symlink(tmp_path / "repo_link", real_repo, target_is_directory=True)
 
     with pytest.raises(PathSecurityError, match="symbolic link"):
         discover_repository(symlink_root)
@@ -76,6 +77,7 @@ def test_read_text_blocks_path_traversal(
 def test_read_text_blocks_post_discovery_toctou_symlink_swap(
     tmp_path: Path,
     make_python_repo: Callable[..., Path],
+    make_symlink: Callable[..., Path],
 ) -> None:
     outside = tmp_path / "secret_target.txt"
     outside.write_text("TOP_SECRET\n", encoding="utf-8")
@@ -86,7 +88,7 @@ def test_read_text_blocks_post_discovery_toctou_symlink_swap(
     # Simulate a TOCTOU swap after discovery completed
     swapped = repo / "src" / "sample" / "core.py"
     swapped.unlink()
-    swapped.symlink_to(outside)
+    make_symlink(swapped, outside)
 
     with pytest.raises(PathSecurityError):
         context.read_text("src/sample/core.py")
@@ -112,8 +114,10 @@ def test_sensitive_and_oversized_files_cannot_be_read_by_analyzers(
         context.read_text("huge.txt")
 
 
-def test_file_count_and_total_byte_limits_and_deep_nesting(tmp_path: Path) -> None:
-    repo = tmp_path / "bounded_repo"
+def test_file_count_and_total_byte_limits_and_deep_nesting(
+    short_root: Path, make_nested_directories: Callable[..., Path]
+) -> None:
+    repo = short_root / "bounded_repo"
     repo.mkdir()
     for idx in range(10):
         (repo / f"f_{idx:02d}.py").write_text("x = 1\n" * 100, encoding="utf-8")
@@ -130,11 +134,8 @@ def test_file_count_and_total_byte_limits_and_deep_nesting(tmp_path: Path) -> No
 
     # Deeply nested directories exceeding MAX_DIRECTORY_DEPTH should not raise RecursionError
     deep = repo / "deep"
-    current = deep
-    for i in range(MAX_DIRECTORY_DEPTH + 15):
-        current = current / f"d{i}"
-    current.mkdir(parents=True)
-    (current / "unreachable.py").write_text("y = 2\n", encoding="utf-8")
+    deepest = make_nested_directories(deep, MAX_DIRECTORY_DEPTH + 15)
+    (deepest / "unreachable.py").write_text("y = 2\n", encoding="utf-8")
 
     deep_context = discover_repository(repo)
     assert not any("unreachable.py" in f.path for f in deep_context.files)
