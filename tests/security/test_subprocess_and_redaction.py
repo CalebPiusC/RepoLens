@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -88,6 +89,32 @@ def test_subprocess_runner_enforces_timeout(tmp_path: Path) -> None:
     )
     assert result.timed_out is True
     assert result.returncode is None
+
+
+def test_timeout_terminates_the_whole_tool_process_tree(tmp_path: Path) -> None:
+    """A timed-out tool must not leave helper processes behind (session vs. process group)."""
+    marker = tmp_path / "grandchild-survived"
+    grandchild = (
+        "import pathlib, time\n"
+        "time.sleep(3)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('alive', encoding='utf-8')\n"
+    )
+    tool = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        "time.sleep(30)\n"
+    )
+
+    result = run_safe_command(
+        [sys.executable, "-c", tool],
+        cwd=tmp_path,
+        timeout_seconds=0.8,
+    )
+
+    assert result.timed_out is True
+    # Give the grandchild more than its own sleep budget to prove it was terminated too.
+    time.sleep(4.0)
+    assert not marker.exists(), "the tool's child process outlived the terminated tool"
 
 
 def test_subprocess_runner_caps_runaway_output(tmp_path: Path) -> None:
