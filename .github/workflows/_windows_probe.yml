@@ -1,0 +1,53 @@
+name: Windows probe (temporary)
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Windows capability probe
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Capability probe
+        shell: bash
+        run: |
+          python tools/_windows_probe.py > probe.txt 2>&1 || true
+          cat probe.txt
+
+      - name: Failing test detail
+        shell: bash
+        run: |
+          python -m pytest -q --tb=long -rf \
+            tests/integration/test_cli_entry_point.py \
+            tests/integration/test_stage2_scan.py \
+            tests/security/test_discovery_safety.py \
+            tests/security/test_stage2_safety.py \
+            tests/security/test_subprocess_and_redaction.py \
+            tests/unit/test_cli.py \
+            tests/unit/test_discovery_failures.py \
+            tests/unit/test_tooling.py > pytest.txt 2>&1 || true
+          cat pytest.txt
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-probe
+          path: |
+            probe.txt
+            pytest.txt
