@@ -28,16 +28,17 @@ RepoLens is built in incremental stages. Stages 1, 2 and 3 are complete:
 **Stage 3 — command-line interface**
 
 - **`repolens` executable** (`repolens.cli`) configured through `[project.scripts]`, with `repolens --help`, `repolens --version`, and `repolens scan [PATH]`.
-- **Terminal reporter** (`repolens.reporting`) showing findings by severity with rule ID, location, message, a per-analyzer status table, severity counts, and an overall result.
+- **Terminal reporter** (`repolens.reporting`) showing findings by severity with rule ID, location, message, an explicit coverage line, actionable `Why`/`Fix` detail blocks, a compact analyzer-status summary, severity counts, and an overall result.
 - **Machine-readable JSON reporter** (`repolens.json_output`) selectable with `--format json`: one deterministic document serialized from the existing `ScanReport` models, carrying a `result` verdict that always agrees with the exit code.
-- **Documented exit-code policy** that distinguishes clean scans, detected findings, invalid input, operational failures, and interrupts — identical for both output formats.
-- **No new dependencies:** the CLI and the JSON reporter are built on the Python standard library (`argparse`, `json`).
+- **Self-contained HTML reporter** (`repolens.html_output`) selectable with `--format html` and writable to a file with `--output`: one accessible, responsive, dark-themed document with no JavaScript, no CDN, and no network access needed to view it.
+- **Documented exit-code policy** that distinguishes clean scans, detected findings, invalid input, operational failures, and interrupts — identical for all three output formats.
+- **No new dependencies:** the CLI and all three reporters are built on the Python standard library (`argparse`, `json`, `html`, `textwrap`).
 
 ### Roadmap
 
 - **Stage 1 (Complete):** Project foundation, shared analysis engine, structure analyzer, and test suite.
 - **Stage 2 (Complete):** Python (`Ruff`, `Bandit`) and JavaScript/TypeScript (`Biome`) analyzer adapters, manifest/lockfile and OSV dependency checks, documentation and static test checks.
-- **Stage 3 (Complete):** Command-line interface (`repolens scan`), terminal reporter, and the versioned JSON output schema (`--format json`). A Markdown reporter remains future work.
+- **Stage 3 (Complete):** Command-line interface (`repolens scan`), terminal reporter, the versioned JSON output schema (`--format json`), and the self-contained HTML reporter (`--format html --output`). A Markdown reporter remains future work.
 - **Stage 4:** Strict opt-in Gemini advisory explanations.
 - **Stage 5:** FastAPI + HTML/HTMX web interface for GitHub archive and ZIP scanning.
 - **Stage 6:** Container isolation hardening, and public beta.
@@ -84,28 +85,68 @@ repolens scan .              # scan the current directory
 repolens scan ../my-service  # scan a specific project directory
 ```
 
-Example output (colors omitted):
+Example output (colors omitted), captured from a real run against a small Python project
+with a missing `LICENSE` and a broken README link:
 
 ```text
-RepoLens 0.1.0 · my-service
-Target: ../my-service
-Scanned 412 file(s) · 3.4 MiB · in 812 ms · languages: python, typescript · 3 dirs excluded
+RepoLens 0.1.0 · docdemo
+Target: .
+Scanned 6 file(s) · 333 B · in 4 ms · languages: python
+Coverage: complete
 
 Findings — 2 at or above 'info' severity
-  SEVERITY  RULE           LOCATION            MESSAGE
-  MEDIUM    RL-STRUCT-001  -                   Missing repository LICENSE file
-  LOW       RL-DOC-003     README.md:12        README links to a missing path: docs/guide.md
+  SEVERITY  RULE           LOCATION     MESSAGE
+  MEDIUM    RL-STRUCT-001  -            Missing repository LICENSE file
+  LOW       RL-DOC-003     README.md:3  README links to a missing path: docs/guide.md
 
-Analyzers
-  STATUS     ANALYZER                   DETAIL
-  completed  repolens-structure         1 finding(s) in 4 ms
-  ...        ...                        ...
+Details
+  MEDIUM · RL-STRUCT-001 · -
+    Missing repository LICENSE file
+    Why: Without an explicit license file, default copyright law applies and others cannot
+         legally use, modify, or redistribute the code.
+    Fix: Add a standard SPDX license file (such as MIT, Apache-2.0, or GPL-3.0) named LICENSE at
+         the repository root.
+  LOW · RL-DOC-003 · README.md:3
+    README links to a missing path: docs/guide.md
+    Why: Broken relative documentation links confuse contributors and are often a sign that
+         files were moved or deleted without updating docs.
+    Fix: Fix the link target or restore `docs/guide.md`.
+
+Analyzers — 4 completed · 2 skipped · 2 unavailable
+  STATUS       ANALYZER                DETAIL
+  unavailable  ruff-python-lint        `ruff` executable was not found on PATH (optional tool not installed).
+  unavailable  bandit-python-security  `bandit` executable was not found on PATH (optional tool not installed).
+  skipped      biome-jsts-lint         Analyzer not applicable to detected repository contents.
+  skipped      osv-dependency-check    Analyzer not applicable to detected repository contents.
 
 Summary
   critical 0 · high 0 · medium 1 · low 1 · info 0
   total 2 finding(s)
   Result: 2 finding(s) detected at or above 'info' severity (exit code 1)
+
+Note: 2 analyzer(s) unavailable because optional tools are not installed: ruff-python-lint, bandit-python-security
 ```
+
+The report is laid out so the four possible outcomes never look alike: a clean scan prints
+`Findings` / `No findings detected.` and `Result: no findings at or above 'info' severity`
+with exit code `0`; a scan with findings prints the table plus detail blocks and exits `1`; an
+incomplete scan prints `Coverage: incomplete — <reasons>` and
+`Result: scan incomplete — no confirmed findings at or above 'info' severity` and exits `3`
+(or `1` when findings take precedence, in which case the result line says both); a failed
+invocation prints nothing on stdout and a single `repolens: error: …` line on stderr with exit
+code `2`, `3`, or `130`.
+
+Every finding in the table also gets a `Details` block with its explanation (`Why:`) and
+recommendation (`Fix:`), wrapped and clipped so a pathological description cannot flood the
+output. `Details` covers exactly the findings shown; raising `--max-findings` shows more.
+
+The `Analyzers` section counts every status on one line and then lists only the analyzers a
+reader has to act on; fully successful analyzers appear in the count alone. Because this run
+had no Ruff or Bandit installed, they show up as `unavailable` with a note — install
+`repolens[tools]` (and Biome) to convert them into `completed`.
+
+A clean repository prints `Coverage: complete`, `Findings` / `No findings detected.`, and
+`Result: no findings at or above 'info' severity (exit code 0)`.
 
 The per-severity counts always describe **every** finding in the report. `--min-severity`
 only decides which findings gate the exit code; the `total` line and the `Result` line make
@@ -126,9 +167,10 @@ lower severities, but every finding is counted in the summary above.
 | Option | Description |
 | --- | --- |
 | `PATH` | Directory to scan. Defaults to `.`. Missing paths, regular files, and symlinked roots are rejected before any analyzer runs. |
-| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity affect the exit code and the `Result` line. Below-threshold findings are counted in the summary (the `total` line reports how many are below) but are not shown as rows in the text table; `--format json` always contains every finding. Default: `info`. |
-| `--max-findings N` | Maximum number of findings printed in the terminal table, `1`-`10000`. Default: `50`. Truncated output is announced. It never truncates `--format json` output. |
-| `--format {text,json}` | Output format. `text` (default) prints the human-readable report; `json` prints exactly one machine-readable JSON document on stdout. The exit codes and every security guarantee are identical for both. See [Machine-readable JSON output](#machine-readable-json-output). |
+| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity affect the exit code and the `Result` line. Below-threshold findings are counted in the summary (the `total` line reports how many are below) but are not shown as rows in the text table; `--format json` and `--format html` always contain every finding. Default: `info`. |
+| `--max-findings N` | Maximum number of findings printed in the terminal table and its `Details` blocks, `1`-`10000`. Default: `50`. Truncated output is announced. It never truncates `--format json` or `--format html` output. |
+| `--format {text,json,html}` | Output format. `text` (default) prints the human-readable report; `json` prints exactly one machine-readable JSON document on stdout; `html` prints a self-contained HTML report. The exit codes and every security guarantee are identical for all three. See [Machine-readable JSON output](#machine-readable-json-output) and [HTML report](#html-report). |
+| `--output PATH` | Write the HTML report to `PATH` instead of stdout. Requires `--format html` (anything else is a usage error, exit `2`). The file is written atomically, so a failed or interrupted write never truncates an existing report; a confirmation line goes to stderr, stdout stays empty, and a successful scan keeps its exit code. If the report cannot be written, the command exits `3`. |
 | `--network-checks` | Enable the optional OSV.dev known-vulnerability lookups (requires network). Disabled by default. |
 | `--color {auto,always,never}` | Terminal coloring. `auto` colors only when stdout is a TTY and `NO_COLOR` is unset. Default: `auto`. |
 | `--version` / `--help` | Print version or help and exit `0`. |
@@ -160,7 +202,8 @@ Notes on the policy:
   was reached. An incomplete scan never exits `0`.
 - An analyzer that was **never available** (an optional tool such as Ruff, Bandit, or Biome
   is not installed) and an analyzer that was **skipped** leave the exit code untouched, so CI
-  is not broken by missing optional tooling. Both are listed in the analyzer table with an
+  is not broken by missing optional tooling. The analyzer section counts every status on
+  its summary line and expands only the analyzers that need attention, with an
   explanatory note. Install `repolens[tools]` and Biome to close those gaps.
 - A check that **started but could not complete** is different: nothing it would have covered
   was verified, so it makes the scan incomplete (exit `3`, or `1` when findings take
@@ -529,6 +572,81 @@ reaching a consumer. The field sets `validate_default=True`, because Pydantic do
 field defaults on its own: a malformed `SCHEMA_VERSION` raises `ValidationError` when the report
 is built, rather than being emitted verbatim.
 
+## HTML report
+
+```bash
+repolens scan . --format html --output report.html
+# repolens: wrote HTML report to report.html   (stderr)
+```
+
+`--format html` renders the same `ScanReport` — the same analysis, the same verdict, the same
+findings — as one self-contained HTML document. `--format html` without `--output` prints the
+document to stdout, which is handy for piping:
+
+```bash
+repolens scan . --format html > report.html
+```
+
+The report contains:
+
+- **Header** with the repository name, the RepoLens version, the document schema version, and
+  the scanned path.
+- **Result** card: the outcome (`Clean scan`, `Findings detected`, `Scan incomplete`, or
+  `Findings detected, scan incomplete`), the exit code, whether coverage was complete, the
+  severity threshold, and how many findings met it.
+- **Scan facts**: files scanned, total size, duration, detected languages, scan timestamp,
+  sensitive files detected, excluded directories.
+- **Findings by severity**: a count for every severity, including zero counts, as a table with
+  a proportional bar. Severity is always given as text as well as colour.
+- **Coverage**: either "every check … completed" or the list of
+  `incomplete_reasons` values shared with the text and JSON output.
+- **Analyzer coverage**: every analyzer with its status, finding count, duration, and detail,
+  including optional tools that were not installed and checks that only partly covered the
+  repository.
+- **Findings**: one card per finding with severity, title, rule ID, location, category,
+  confidence, source tool, evidence, explanation, recommendation, and verification. Rule
+  documentation links are emitted only for `http`/`https` URLs.
+- **Notes**: discovery limits (unreadable entries, depth, file/byte caps, oversized files,
+  unfollowed symlinks) that mean the report is not a complete picture.
+- **Footer**: generator, schema version, status, and the incomplete-reason list.
+
+Properties:
+
+- **Self-contained.** Inline CSS, no JavaScript, no images, no web fonts, no CDN, no
+  `@import`, and no absolute external references — the file renders identically offline and
+  from `file://`.
+- **No JavaScript is required, or emitted.** Nothing in the document is script, so there is no
+  script-injection surface at all.
+- **Everything repository-derived is escaped.** Titles, paths, evidence, analyzer messages,
+  the repository name, and the target path pass through `html.escape(quote=True)` before they
+  reach the markup. A finding containing `<script>` appears as literal text, never as markup.
+- **Links are allowlisted.** A rule link is emitted only for an absolute `http(s)` URL that has
+  a host and no embedded credentials, whitespace, or control characters — which rules out
+  `javascript:`, `data:`, `vbscript:`, `file:`, protocol-relative `//host` URLs, and opaque
+  `http:host` forms — and it always carries `rel="noopener noreferrer"`.
+- **Accessible and responsive.** `lang`, charset, and viewport are declared, landmarks
+  (`header`/`main`/`footer`/`nav`) and heading levels are semantic, tables have captions and
+  scoped column/row headers, there is a "skip to findings" link, focus styles are visible,
+  `color-scheme: dark` keeps native controls consistent with the palette, and the fact grid
+  reflows to a single column on narrow screens. A print stylesheet switches to a light
+  palette.
+- **Complete.** Every finding in the report is included; `--max-findings` limits only the
+  terminal table, never a saved report.
+- **Deterministic.** Rendering the same report twice produces byte-identical HTML; only
+  `scanned_at` and the measured durations vary between scans.
+- **Exit-code preserving.** `--format html` exits exactly like `--format text` and
+  `--format json`.
+
+`--output` requires `--format html`; using it with another format is a usage error (exit `2`).
+The file is written to a temporary file in the destination directory and moved into place, so
+an interrupted write never truncates an existing report, and an unwritable destination is
+reported on stderr as an operational failure (exit `3`) without a traceback. Because the report
+replaces the destination rather than opening it for writing, a destination that is a symbolic
+link is replaced by a real file instead of being followed, and the new file gets the ordinary
+`0644 & ~umask` permissions of a freshly created file rather than the `0600` of a temporary
+file. An existing report at the destination is overwritten. `--color` does not apply to HTML
+output.
+
 ## Optional external tools
 
 RepoLens never installs tools for you and never installs anything from the scanned repository. Install these once on the machine that runs the scan if you want the corresponding analyzer:
@@ -675,6 +793,11 @@ print(render_report(report, options=RenderOptions(color=False)))
 
 # The same JSON document the CLI emits with --format json.
 print(render_json(report, exit_code=0))
+
+# The same self-contained HTML document the CLI emits with --format html.
+from repolens.html_output import render_html
+
+Path("report.html").write_text(render_html(report, exit_code=0), encoding="utf-8")
 ```
 
 A document written by the CLI — body **plus** `result` — can be read back into validated models:

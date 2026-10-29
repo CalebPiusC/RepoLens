@@ -11,8 +11,10 @@ the ones the library enforces.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final, TextIO
@@ -21,6 +23,7 @@ from repolens import __version__
 from repolens.config import ScanConfig
 from repolens.engine import ScanEngine
 from repolens.exceptions import DiscoveryAbortedError, DiscoveryError, RepoLensError
+from repolens.html_output import render_html
 from repolens.json_output import render_json
 from repolens.models import ScanReport, Severity
 from repolens.redaction import redact_secrets
@@ -64,6 +67,9 @@ Output formats:
   text   human-readable report with an analyzer table and a summary (default)
   json   one machine-readable JSON document on stdout, with no color and no progress
          text; diagnostics still go to stderr and the exit codes above are unchanged
+  html   one self-contained dark-themed HTML document (no JavaScript, no CDN, no
+         network access when viewed) that includes every finding; use --output to save
+         it to a file
 
 RepoLens is a static analyzer: it never executes code, installs dependencies, or runs
 test suites from the repository it scans.
@@ -78,6 +84,8 @@ examples:
   repolens scan . --network-checks
                                   enable optional OSV.dev vulnerability lookups
   repolens scan . --format json   machine-readable output for CI and tooling
+  repolens scan . --format html --output report.html
+                                  write a shareable HTML report to a file
 """
 
 
@@ -161,12 +169,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan_parser.add_argument(
         "--format",
-        choices=("text", "json"),
+        choices=("text", "json", "html"),
         default="text",
-        metavar="{text,json}",
+        metavar="{text,json,html}",
         help="output format: 'text' for the human-readable report, 'json' for one "
-        "machine-readable document on stdout (always complete, never colorized) "
-        "(default: text)",
+        "machine-readable document on stdout (always complete, never colorized), 'html' "
+        "for a self-contained HTML report (default: text)",
+    )
+    scan_parser.add_argument(
+        "--output",
+        metavar="PATH",
+        default=None,
+        help="write the HTML report to PATH instead of stdout (requires --format html); "
+        "a scan's exit code is unchanged, but a report that cannot be written exits 3",
     )
     scan_parser.add_argument(
         "--network-checks",
@@ -223,12 +238,14 @@ class _ScanCommand:
         options: RenderOptions,
         color_mode: str,
         output_format: str,
+        output_path: Path | None = None,
     ) -> None:
         self.target = target
         self.config = config
         self.options = options
         self.color_mode = color_mode
         self.output_format = output_format
+        self.output_path = output_path
 
     def run(self, *, stdout: TextIO, stderr: TextIO) -> int:
         """Execute the scan, print the report, and return the exit code."""
@@ -275,6 +292,31 @@ class _ScanCommand:
             )
             return exit_code
 
+        if self.output_format == "html":
+            # The HTML report is complete (every finding, never truncated) and
+            # self-contained; --color does not apply, and --output only redirects it.
+            document = render_html(
+                report,
+                exit_code=exit_code,
+                min_severity=self.options.min_severity,
+                target_path=str(self.target),
+            )
+            if self.output_path is None:
+                print(document, file=stdout)
+                return exit_code
+            try:
+                _write_atomically(self.output_path, document)
+            except OSError as exc:
+                destination = _safe_text(str(self.output_path))
+                print(
+                    f"repolens: error: could not write {destination}: {_safe(exc)}",
+                    file=stderr,
+                )
+                return EXIT_OPERATIONAL
+            written = _safe_text(str(self.output_path))
+            print(f"repolens: wrote HTML report to {written}", file=stderr)
+            return exit_code
+
         options = RenderOptions(
             color=_use_color(self.color_mode, stdout),
             min_severity=self.options.min_severity,
@@ -299,6 +341,17 @@ def _scan_command(args: argparse.Namespace) -> _ScanCommand:
     if "\x00" in raw_path:
         raise _UsageError("PATH must not contain NUL bytes")
 
+    raw_output = args.output
+    output_path: Path | None = None
+    if raw_output is not None:
+        if args.format != "html":
+            raise _UsageError("--output requires --format html")
+        if not isinstance(raw_output, str) or not raw_output.strip():
+            raise _UsageError("--output PATH must be a non-empty file path")
+        if "\x00" in raw_output:
+            raise _UsageError("--output PATH must not contain NUL bytes")
+        output_path = Path(raw_output).expanduser()
+
     min_severity = Severity(args.min_severity)
     return _ScanCommand(
         target=Path(raw_path).expanduser(),
@@ -309,6 +362,7 @@ def _scan_command(args: argparse.Namespace) -> _ScanCommand:
         ),
         color_mode=str(args.color),
         output_format=str(args.format),
+        output_path=output_path,
     )
 
 
@@ -330,6 +384,33 @@ def determine_exit_code(report: ScanReport, min_severity: Severity = Severity.IN
     return EXIT_OK
 
 
+def _write_atomically(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` without leaving a partial file behind.
+
+    The document is written to a temporary file in the destination directory and then
+    moved into place, so an interrupted or failed write never truncates an existing
+    report. Errors (missing directory, permissions, a directory in the way, ...) surface
+    as :class:`OSError` and are reported by the caller.
+    """
+    directory = path.parent if str(path.parent) else Path(".")
+    handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(directory))
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # ``mkstemp`` creates 0600 files; give the report the permissions a plain
+        # ``open(..., "w")`` would have produced under the current umask instead.
+        current_umask = os.umask(0)
+        os.umask(current_umask)
+        os.chmod(temporary, 0o666 & ~current_umask)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):  # best-effort cleanup; never mask the error
+            os.unlink(temporary)
+        raise
+
+
 def _use_color(mode: str, stream: TextIO) -> bool:
     """Decide whether ANSI styling is appropriate for ``stream``."""
     if mode == "always":
@@ -343,9 +424,14 @@ def _use_color(mode: str, stream: TextIO) -> bool:
     return bool(getattr(stream, "isatty", lambda: False)())
 
 
+def _safe_text(text: str) -> str:
+    """Return scrubbed, single-line text suitable for a terminal."""
+    return redact_secrets(" ".join(text.split()) or "?", max_length=500)
+
+
 def _safe(exc: BaseException) -> str:
     """Return a scrubbed, single-line error message suitable for a terminal."""
-    return redact_secrets(" ".join(str(exc).split()) or type(exc).__name__, max_length=500)
+    return _safe_text(str(exc)) if str(exc) else type(exc).__name__
 
 
 def _safe_unexpected(exc: BaseException) -> str:

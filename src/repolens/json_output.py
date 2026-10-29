@@ -40,14 +40,12 @@ from repolens.exceptions import (
 from repolens.models import (
     SCHEMA_VERSION,
     SUPPORTED_SCHEMA_MAJOR_VERSIONS,
-    AnalyzerStatus,
-    IncompleteReason,
     ScanReport,
     ScanResult,
     ScanStatus,
     Severity,
 )
-from repolens.reporting import evaluate
+from repolens.reporting import evaluate, incomplete_reasons
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
@@ -60,12 +58,6 @@ _MAPPING_ORIGINS: Final = frozenset({dict, Mapping})
 _SEQUENCE_ORIGINS: Final = frozenset({list, set, frozenset, tuple})
 # Both spellings of a union: ``X | None`` from PEP 604 and ``Optional[X]`` from ``typing``.
 _UNION_ORIGINS: Final = frozenset({Union, types.UnionType})
-
-# Fixed emission order for ``incomplete_reasons``; membership, not analyzer order, decides.
-_REASON_FOR_STATUS: Final[dict[AnalyzerStatus, IncompleteReason]] = {
-    AnalyzerStatus.FAILED: IncompleteReason.ANALYZER_FAILED,
-    AnalyzerStatus.TIMED_OUT: IncompleteReason.ANALYZER_TIMED_OUT,
-}
 
 
 def build_scan_result(
@@ -82,21 +74,9 @@ def build_scan_result(
     """
     verdict = evaluate(report, min_severity)
 
-    reasons: set[IncompleteReason] = set()
-    for outcome in verdict.incomplete_analyzers:
-        reason = _REASON_FOR_STATUS.get(outcome.status)
-        if reason is not None:
-            reasons.add(reason)
-    if verdict.partial_coverage_analyzers:
-        reasons.add(IncompleteReason.ANALYZER_COVERAGE_TRUNCATED)
-    if verdict.aborted_checks:
-        reasons.add(IncompleteReason.CHECK_ABORTED)
-    if verdict.discovery_failures:
-        reasons.add(IncompleteReason.DISCOVERY_UNREADABLE)
-    if verdict.discovery_truncated:
-        reasons.add(IncompleteReason.DISCOVERY_TRUNCATED)
-    if verdict.discovery_depth_limited:
-        reasons.add(IncompleteReason.DISCOVERY_DEPTH_LIMITED)
+    # ``reporting.incomplete_reasons`` is the single source of truth shared with the text
+    # and HTML renderers, so no format can disagree about why a scan is incomplete.
+    reasons = incomplete_reasons(verdict)
 
     if verdict.has_findings and verdict.is_incomplete:
         status = ScanStatus.FINDINGS_AND_INCOMPLETE
@@ -113,8 +93,7 @@ def build_scan_result(
         status=status,
         has_findings=verdict.has_findings,
         is_complete=not verdict.is_incomplete,
-        # Iterating the enum (not the set) keeps the list order independent of analyzer order.
-        incomplete_reasons=[member for member in IncompleteReason if member in reasons],
+        incomplete_reasons=list(reasons),
         findings_total=verdict.total_findings,
         findings_at_or_above_threshold=len(verdict.findings_at_or_above),
         counts_by_severity=report.counts_by_severity(),
