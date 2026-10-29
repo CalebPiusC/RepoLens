@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 
@@ -28,7 +29,14 @@ from repolens.exceptions import (
     DiscoveryError,
     SensitiveFileAccessError,
 )
-from repolens.models import AnalyzerOutcome, AnalyzerStatus, Finding, ScanReport, Severity
+from repolens.models import (
+    SCHEMA_VERSION,
+    AnalyzerOutcome,
+    AnalyzerStatus,
+    Finding,
+    ScanReport,
+    Severity,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -102,6 +110,8 @@ def test_scan_help_documents_options(capsys: pytest.CaptureFixture[str]) -> None
     assert "--min-severity" in out
     assert "--max-findings" in out
     assert "--network-checks" in out
+    assert "--format" in out
+    assert "json" in out
     assert "--color" in out
     assert "examples:" in out
 
@@ -140,6 +150,7 @@ def test_parser_defaults() -> None:
     assert args.max_findings == 50
     assert args.color == "auto"
     assert args.network_checks is False
+    assert args.format == "text"
 
 
 # --------------------------------------------------------------------------------------
@@ -635,6 +646,175 @@ def test_environment_is_not_mutated_by_scan(
     capsys.readouterr()
 
     assert dict(os.environ) == before
+
+
+# --------------------------------------------------------------------------------------
+# Machine-readable JSON output
+# --------------------------------------------------------------------------------------
+
+
+def _json_stdout(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
+    """Parse stdout as the single JSON document the CLI is contracted to emit."""
+    captured = capsys.readouterr()
+    assert captured.err == "", captured.err
+    parsed = json.loads(captured.out)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_json_format_writes_only_one_json_document(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+
+    assert main(["scan", ".", "--format", "json"]) == EXIT_FINDINGS
+
+    parsed = _json_stdout(capsys)
+    assert parsed["schema_version"] == SCHEMA_VERSION
+    assert parsed["findings"][0]["rule_id"] == "RL-STRUCT-001"
+    assert parsed["result"]["exit_code"] == EXIT_FINDINGS
+    assert parsed["result"]["status"] == "findings"
+
+
+def test_json_format_output_has_no_human_readable_banner_or_color(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report()
+
+    assert main(["scan", ".", "--format", "json", "--color", "always"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out
+    for banner in ("RepoLens 0.0", "Summary", "Result:", "Analyzers", "Scanned "):
+        assert banner not in out
+
+
+@pytest.mark.parametrize(
+    ("report_kwargs", "expected_exit", "expected_status"),
+    [
+        ({}, EXIT_OK, "clean"),
+        ({"findings_count": 1}, EXIT_FINDINGS, "findings"),
+        ({"failed": True}, EXIT_OPERATIONAL, "incomplete"),
+        ({"findings_count": 1, "failed": True}, EXIT_FINDINGS, "findings_and_incomplete"),
+        ({"truncated": True}, EXIT_OPERATIONAL, "incomplete"),
+    ],
+)
+def test_json_format_preserves_documented_exit_codes(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    capsys: pytest.CaptureFixture[str],
+    report_kwargs: dict[str, object],
+    expected_exit: int,
+    expected_status: str,
+) -> None:
+    findings = [make_finding()] if report_kwargs.get("findings_count") else []
+    outcomes = None
+    if report_kwargs.get("failed"):
+        outcomes = [AnalyzerOutcome(analyzer_name="bandit", status=AnalyzerStatus.FAILED)]
+    fake_engine.report = make_scan_report(
+        findings=findings,
+        outcomes=outcomes,
+        truncated_by_file_limit=bool(report_kwargs.get("truncated")),
+    )
+
+    assert main(["scan", ".", "--format", "json"]) == expected_exit
+
+    parsed = _json_stdout(capsys)
+    assert parsed["result"]["exit_code"] == expected_exit
+    assert parsed["result"]["status"] == expected_status
+
+
+def test_json_format_reports_unavailable_analyzers_without_changing_the_exit_code(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(
+                analyzer_name="ruff-python-lint",
+                status=AnalyzerStatus.UNAVAILABLE,
+                message="`ruff` executable was not found on PATH.",
+            )
+        ]
+    )
+
+    assert main(["scan", ".", "--format", "json"]) == EXIT_OK
+
+    parsed = _json_stdout(capsys)
+    assert parsed["analyzer_outcomes"][0]["status"] == "unavailable"
+    assert parsed["result"]["is_complete"] is True
+    assert parsed["result"]["incomplete_reasons"] == []
+
+
+def test_json_format_includes_every_finding_despite_max_findings(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--max-findings`` is a terminal-table limit; machine output stays complete."""
+    findings = [make_finding(rule_id=f"RL-RULE-{index:03d}") for index in range(5)]
+    fake_engine.report = make_scan_report(findings=findings)
+
+    assert main(["scan", ".", "--format", "json", "--max-findings", "1"]) == EXIT_FINDINGS
+
+    parsed = _json_stdout(capsys)
+    assert [item["rule_id"] for item in parsed["findings"]] == [
+        f"RL-RULE-{i:03d}" for i in range(5)
+    ]
+    assert parsed["result"]["findings_total"] == 5
+
+
+def test_json_format_keeps_diagnostics_on_stderr_and_stdout_empty(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    assert main(["scan", str(tmp_path / "missing"), "--format", "json"]) == EXIT_USAGE
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Repository path does not exist" in captured.err
+
+
+def test_json_format_keeps_operational_errors_on_stderr(
+    fake_engine: type[_FakeEngine], capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_engine.error = DiscoveryAbortedError("refused to continue")
+
+    assert main(["scan", ".", "--format", "json"]) == EXIT_OPERATIONAL
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "scan aborted part-way" in captured.err
+
+
+def test_text_format_is_still_the_default(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report()
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert out.startswith("RepoLens ")
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(out)
+
+
+def test_invalid_format_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["scan", ".", "--format", "yaml"]) == EXIT_USAGE
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--format" in captured.err
 
 
 # --------------------------------------------------------------------------------------

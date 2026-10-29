@@ -6,11 +6,45 @@ import hashlib
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Self
+from typing import Final, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from repolens.redaction import redact_secrets
+
+SCHEMA_VERSION: Final = "1.1.0"
+"""Version of the serialized scan document (see "Machine-readable JSON output" in the README).
+
+The version identifies the **shape** of a serialized :class:`ScanReport` (and therefore of
+the JSON document the CLI emits), independently of ``repolens_version``, which identifies the
+package release. It follows semantic versioning:
+
+* **MAJOR** — a field, enum value, or field *meaning* is removed or changed, or a previously
+  optional member becomes required. Consumers must be updated.
+* **MINOR** — purely additive: a new field, a new optional member, or a new enum value.
+  Consumers must ignore members they do not know.
+* **PATCH** — documentation or clarification only; the emitted shape is unchanged.
+
+``1.1.0`` is the first version documented as a stability contract. It adds the CLI
+``result`` member to the ``1.0.0`` report fields; nothing from ``1.0.0`` was renamed,
+removed, or re-typed.
+"""
+
+SCHEMA_MAJOR_VERSION: Final = int(SCHEMA_VERSION.split(".", 1)[0])
+"""Major component of :data:`SCHEMA_VERSION` (``1`` for ``1.1.0``)."""
+
+SUPPORTED_SCHEMA_MAJOR_VERSIONS: Final[frozenset[int]] = frozenset({SCHEMA_MAJOR_VERSION})
+"""Schema major versions :func:`repolens.json_output.parse_json_document` accepts.
+
+Acceptance policy for a parser shipped with ``SCHEMA_VERSION``:
+
+* **Same major, any minor/patch** (newer *or* older) — accepted. Additive MINOR changes are
+  tolerated as documented in the README: unknown members are ignored, but an unknown value
+  for a known member stops parsing rather than being guessed.
+* **Different major** (including older ``0.x`` documents) — rejected with
+  :class:`repolens.exceptions.UnsupportedSchemaVersionError`. A major bump means a member was
+  removed, renamed, or re-typed, so the old meaning of a field cannot be assumed.
+"""
 
 
 class Category(StrEnum):
@@ -71,6 +105,37 @@ class AnalyzerStatus(StrEnum):
     UNAVAILABLE = "unavailable"
     TIMED_OUT = "timed_out"
     FAILED = "failed"
+
+
+class ScanStatus(StrEnum):
+    """Overall verdict of a completed scan, as reported by the CLI ``result`` member.
+
+    Mirrors the terminal "Result:" line and the exit-code policy: ``FINDINGS`` and
+    ``FINDINGS_AND_INCOMPLETE`` are the two states that exit ``1``, ``INCOMPLETE`` exits
+    ``3``, and only ``CLEAN`` exits ``0``.
+    """
+
+    CLEAN = "clean"
+    FINDINGS = "findings"
+    INCOMPLETE = "incomplete"
+    FINDINGS_AND_INCOMPLETE = "findings_and_incomplete"
+
+
+class IncompleteReason(StrEnum):
+    """Machine-readable reasons why a scan did not cover the whole repository.
+
+    An empty list means the scan verified everything it set out to check. An analyzer that
+    never started because an optional tool is missing is *not* a reason here: it is reported
+    through ``analyzer_outcomes[].status == "unavailable"`` and does not change the exit code.
+    """
+
+    ANALYZER_FAILED = "analyzer_failed"
+    ANALYZER_TIMED_OUT = "analyzer_timed_out"
+    ANALYZER_COVERAGE_TRUNCATED = "analyzer_coverage_truncated"
+    CHECK_ABORTED = "check_aborted"
+    DISCOVERY_UNREADABLE = "discovery_unreadable"
+    DISCOVERY_TRUNCATED = "discovery_truncated"
+    DISCOVERY_DEPTH_LIMITED = "discovery_depth_limited"
 
 
 class DetectedLanguage(StrEnum):
@@ -295,7 +360,7 @@ class ScanReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: str = "1.0.0"
+    schema_version: str = Field(default=SCHEMA_VERSION, pattern=r"^\d+\.\d+\.\d+$")
     repolens_version: str = Field(min_length=1, max_length=32)
     repository_name: str = Field(min_length=1, max_length=256)
     scanned_at: datetime
@@ -322,3 +387,43 @@ class ScanReport(BaseModel):
     def has_findings_at_or_above(self, threshold: Severity) -> bool:
         """Return True if any deterministic finding meets or exceeds ``threshold``."""
         return any(f.severity.rank >= threshold.rank for f in self.findings)
+
+
+class ScanResult(BaseModel):
+    """Derived, machine-readable verdict for a scan, emitted as the CLI ``result`` member.
+
+    This is not a second report: every value is computed from a :class:`ScanReport` by the
+    same :func:`repolens.reporting.evaluate` logic that drives the terminal "Result:" line
+    and :func:`repolens.cli.determine_exit_code`. It exists so a JSON consumer never has to
+    re-implement the exit-code policy.
+
+    ``counts_by_severity`` and ``counts_by_category`` always contain **every** enum member,
+    including zero counts, in enum declaration order (severity: critical, high, medium, low,
+    info; category: code_quality, security, dependencies, documentation, testing, structure).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    exit_code: int = Field(ge=0, le=130)
+    min_severity: Severity
+    status: ScanStatus
+    has_findings: bool
+    is_complete: bool
+    incomplete_reasons: list[IncompleteReason] = Field(default_factory=list)
+    findings_total: int = Field(ge=0)
+    findings_at_or_above_threshold: int = Field(ge=0)
+    counts_by_severity: dict[Severity, int]
+    counts_by_category: dict[Category, int]
+
+    @model_validator(mode="after")
+    def _require_complete_count_maps(self) -> Self:
+        # Zero counts must still be present, so consumers can read a key unconditionally.
+        if set(self.counts_by_severity) != set(Severity):
+            raise ValueError("counts_by_severity must contain one entry per severity")
+        if set(self.counts_by_category) != set(Category):
+            raise ValueError("counts_by_category must contain one entry per category")
+        if any(count < 0 for count in self.counts_by_severity.values()) or any(
+            count < 0 for count in self.counts_by_category.values()
+        ):
+            raise ValueError("finding counts must not be negative")
+        return self

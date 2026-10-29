@@ -29,14 +29,15 @@ RepoLens is built in incremental stages. Stages 1, 2 and 3 are complete:
 
 - **`repolens` executable** (`repolens.cli`) configured through `[project.scripts]`, with `repolens --help`, `repolens --version`, and `repolens scan [PATH]`.
 - **Terminal reporter** (`repolens.reporting`) showing findings by severity with rule ID, location, message, a per-analyzer status table, severity counts, and an overall result.
-- **Documented exit-code policy** that distinguishes clean scans, detected findings, invalid input, operational failures, and interrupts.
-- **No new dependencies:** the CLI is built on the Python standard library (`argparse`).
+- **Machine-readable JSON reporter** (`repolens.json_output`) selectable with `--format json`: one deterministic document serialized from the existing `ScanReport` models, carrying a `result` verdict that always agrees with the exit code.
+- **Documented exit-code policy** that distinguishes clean scans, detected findings, invalid input, operational failures, and interrupts — identical for both output formats.
+- **No new dependencies:** the CLI and the JSON reporter are built on the Python standard library (`argparse`, `json`).
 
 ### Roadmap
 
 - **Stage 1 (Complete):** Project foundation, shared analysis engine, structure analyzer, and test suite.
 - **Stage 2 (Complete):** Python (`Ruff`, `Bandit`) and JavaScript/TypeScript (`Biome`) analyzer adapters, manifest/lockfile and OSV dependency checks, documentation and static test checks.
-- **Stage 3 (Complete):** Command-line interface (`repolens scan`) and terminal reporter. JSON and Markdown reporters remain future work.
+- **Stage 3 (Complete):** Command-line interface (`repolens scan`), terminal reporter, and the versioned JSON output schema (`--format json`). A Markdown reporter remains future work.
 - **Stage 4:** Strict opt-in Gemini advisory explanations.
 - **Stage 5:** FastAPI + HTML/HTMX web interface for GitHub archive and ZIP scanning.
 - **Stage 6:** Container isolation hardening, and public beta.
@@ -126,7 +127,8 @@ lower severities, but every finding is counted in the summary above.
 | --- | --- |
 | `PATH` | Directory to scan. Defaults to `.`. Missing paths, regular files, and symlinked roots are rejected before any analyzer runs. |
 | `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity affect the exit code and the `Result` line. Every finding is still listed and counted in the summary, and the `total` line reports how many are below the threshold. Default: `info`. |
-| `--max-findings N` | Maximum number of findings printed, `1`-`10000`. Default: `50`. Truncated output is announced. |
+| `--max-findings N` | Maximum number of findings printed in the terminal table, `1`-`10000`. Default: `50`. Truncated output is announced. It never truncates `--format json` output. |
+| `--format {text,json}` | Output format. `text` (default) prints the human-readable report; `json` prints exactly one machine-readable JSON document on stdout. The exit codes and every security guarantee are identical for both. See [Machine-readable JSON output](#machine-readable-json-output). |
 | `--network-checks` | Enable the optional OSV.dev known-vulnerability lookups (requires network). Disabled by default. |
 | `--color {auto,always,never}` | Terminal coloring. `auto` colors only when stdout is a TTY and `NO_COLOR` is unset. Default: `auto`. |
 | `--version` / `--help` | Print version or help and exit `0`. |
@@ -230,6 +232,276 @@ link to the issue tracker; secrets are redacted before anything is printed.
 
 `Ctrl-C` returns `130` whether it arrives during discovery, during an analyzer, or while the
 report is being rendered and printed — no traceback is shown in any of those cases.
+
+## Machine-readable JSON output
+
+`--format json` writes exactly one JSON document to stdout and nothing else, so it can be piped
+straight into `jq`, uploaded as a CI artifact, or consumed by another program:
+
+```bash
+repolens scan . --format json > repolens-report.json
+repolens scan . --format json | jq '.result.status, .result.exit_code'
+repolens scan . --format json | jq -r '.findings[] | "\(.severity)\t\(.rule_id)\t\(.location.path)"'
+```
+
+The exit code is unchanged by the format: `0` clean, `1` findings, `2` usage, `3` incomplete,
+`130` interrupt. A JSON document is only written when the scan produced a report; usage and
+operational errors still print a single-line diagnostic to **stderr** and leave stdout empty, so
+`json.load(sys.stdin)` never sees a half-written document.
+
+### Document shape
+
+```json
+{
+  "schema_version": "1.1.0",
+  "repolens_version": "0.1.0",
+  "repository_name": "my-service",
+  "scanned_at": "2026-10-29T09:40:11.768464Z",
+  "duration_ms": 812.4,
+  "discovery": {
+    "total_files_scanned": 412,
+    "total_bytes_scanned": 3565158,
+    "skipped_excluded_count": 3,
+    "skipped_symlink_count": 0,
+    "skipped_oversized_count": 0,
+    "sensitive_files_detected": 0,
+    "truncated_by_file_limit": false,
+    "truncated_by_byte_limit": false,
+    "unreadable_directory_count": 0,
+    "unreadable_entry_count": 0,
+    "skipped_by_depth_count": 0,
+    "detected_languages": ["python", "typescript"]
+  },
+  "analyzer_outcomes": [
+    {
+      "analyzer_name": "ruff-python-lint",
+      "status": "completed",
+      "findings_count": 1,
+      "duration_ms": 36.2,
+      "message": "Ruff analyzed 128 Python file(s).",
+      "coverage_truncated": false,
+      "coverage_incomplete": false
+    },
+    {
+      "analyzer_name": "biome-jsts-lint",
+      "status": "unavailable",
+      "findings_count": 0,
+      "duration_ms": 0.0,
+      "message": "`biome` executable was not found on PATH (optional tool not installed).",
+      "coverage_truncated": false,
+      "coverage_incomplete": false
+    }
+  ],
+  "findings": [
+    {
+      "rule_id": "RL-DOC-003",
+      "category": "documentation",
+      "severity": "low",
+      "confidence": "medium",
+      "title": "README links to a missing path: docs/guide.md",
+      "location": {"path": "README.md", "start_line": 3, "end_line": null, "column": null},
+      "evidence": "Markdown link target `docs/guide.md` does not exist.",
+      "explanation": "Broken relative documentation links confuse contributors and are often a sign that files were moved or deleted without updating docs.",
+      "recommendation": "Fix the link target or restore `docs/guide.md`.",
+      "verification": "Open the rendered README and confirm the link resolves.",
+      "source": {
+        "kind": "deterministic",
+        "tool": "repolens-documentation",
+        "tool_version": "0.1.0",
+        "rule_url": null
+      },
+      "fingerprint": "dd56d3342caaf8c2a3f0c15a"
+    }
+  ],
+  "ai_advisories": [],
+  "result": {
+    "exit_code": 1,
+    "min_severity": "info",
+    "status": "findings",
+    "has_findings": true,
+    "is_complete": true,
+    "incomplete_reasons": [],
+    "findings_total": 1,
+    "findings_at_or_above_threshold": 1,
+    "counts_by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 1, "info": 0},
+    "counts_by_category": {
+      "code_quality": 0,
+      "security": 0,
+      "dependencies": 0,
+      "documentation": 1,
+      "testing": 0,
+      "structure": 0
+    }
+  }
+}
+```
+
+The document body is `ScanReport.model_dump(mode="json")` — the same Pydantic models the
+library returns. There is no parallel reporting schema to drift out of sync. `result` is the
+only added member; it is derived from the same verdict that decides the exit code, so a
+consumer never has to re-implement that policy.
+
+**Upgrading from the `1.0.0` report.** The addition of `result` is additive, but a *strict*
+reader is affected: `ScanReport` sets `extra="forbid"`, so validating the new CLI document with
+an old `ScanReport` model fails with `Extra inputs are not permitted` for the `result` member.
+That is expected, not damage — the report body itself is unchanged. Three ways to handle it:
+
+```python
+import json
+from repolens.json_output import parse_json_document
+
+payload = json.loads(text)
+
+# 1. Use the maintained parser (validates the body and result separately).
+parsed = parse_json_document(text)
+
+# 2. Keep your own model, but hand it only the body.
+from repolens.models import ScanReport
+report = ScanReport.model_validate({k: v for k, v in payload.items() if k != "result"})
+
+# 3. Or read leniently and let the parser ignore members it does not know.
+parsed = parse_json_document(text, strict=False)
+```
+
+Any existing field keeps its name, type, and meaning, so a reader that ignores unknown members —
+or that validates the body alone — continues to work unchanged.
+
+### `result` semantics
+
+| Member | Meaning |
+| --- | --- |
+| `exit_code` | The process exit code, identical to what the shell observes. |
+| `min_severity` | The `--min-severity` threshold applied to findings for the verdict. |
+| `status` | `clean`, `findings`, `incomplete`, or `findings_and_incomplete`. |
+| `has_findings` | At least one finding met the threshold. |
+| `is_complete` | Everything RepoLens set out to check was actually verified. |
+| `incomplete_reasons` | Sorted, de-duplicated reasons: `analyzer_failed`, `analyzer_timed_out`, `analyzer_coverage_truncated`, `check_aborted`, `discovery_unreadable`, `discovery_truncated`, `discovery_depth_limited`. |
+| `findings_total` / `findings_at_or_above_threshold` | Every finding, versus the ones that gated the exit code. |
+| `counts_by_severity` / `counts_by_category` | Counts for **every** enum member including zeros, in enum order, so a key can be read unconditionally. |
+
+### How to tell whether a scan is complete
+
+Read `result.is_complete` (and `result.incomplete_reasons` for why) rather than interpreting
+analyzer statuses yourself: that single boolean is what the exit code is derived from.
+
+Five analyzer situations look similar in the analyzer table but differ in effect:
+
+| Situation | `analyzer_outcomes[]` | Scan incomplete? | Exit code |
+| --- | --- | --- | --- |
+| Optional tool never installed — the check never started | `status: "unavailable"`, `coverage_incomplete: false` | No | Unchanged |
+| Analyzer not applicable to this repository, or deliberately skipped | `status: "skipped"` | No | Unchanged |
+| Analyzer ran but covered only part of the files (a tool file cap was reached) | `status: "completed"`, `coverage_truncated: true` | Yes — `analyzer_coverage_truncated` | `3` (or `1` with findings) |
+| Analyzer started and then failed or timed out | `status: "failed"` / `"timed_out"`, `coverage_incomplete: false` | Yes — `analyzer_failed` / `analyzer_timed_out` | `3` (or `1` with findings) |
+| Check started, then could not complete (for example a requested network lookup failed mid-flight) | `status: "unavailable"` **with** `coverage_incomplete: true` | Yes — `check_aborted` | `3` (or `1` with findings) |
+
+Note that `coverage_incomplete` is **not** the general "this scan is incomplete" flag: it marks
+only the *started-then-aborted* case, where a check reported a status that would otherwise look
+like a benign "not installed". A failed or timed-out analyzer makes the scan incomplete through
+its status and the matching `incomplete_reasons` entry, even though `coverage_incomplete` is
+`false` for it. Consumers that only inspect `coverage_incomplete` will miss those scans, so key
+off `result.is_complete` (or `result.incomplete_reasons`) instead.
+
+### Guarantees
+
+- **Nothing but the document on stdout.** No banner, progress text, ANSI color (even with
+  `--color always`), or human-readable summary is mixed into the stream. Diagnostics stay on
+  stderr.
+- **Complete findings.** `--max-findings` limits only the terminal table; the JSON document
+  always contains every finding.
+- **Deterministic.** For the same repository content and options, the document is byte-identical
+  except for `scanned_at` and the `duration_ms` values. Member order is fixed (report fields in
+  model order, then `result`), findings keep the engine's deterministic sort (severity rank,
+  category, path, line, rule ID, fingerprint), analyzer outcomes keep analyzer order, and count
+  maps are emitted in enum order.
+- **Portable encoding.** Output is ASCII-only (`\uXXXX` escapes for non-ASCII names) so the bytes
+  are identical regardless of the console encoding, including Windows code pages. Timestamps are
+  RFC 3339 in UTC with a `Z` suffix; paths are repository-relative POSIX paths with forward
+  slashes; optional values are `null`, never omitted; enums are their documented string values.
+- **Same security model.** The document is serialized from already-redacted report models, so
+  secret redaction, sensitive-file blocking, and symlink rules apply exactly as they do for
+  terminal output.
+
+### Schema versioning
+
+`schema_version` identifies the **shape** of the document, independently of `repolens_version`
+(which identifies the package release). It follows semantic versioning:
+
+| Change | Version bump |
+| --- | --- |
+| Removing or renaming a member, changing a type or the meaning of a value, adding a required member | **MAJOR** |
+| Adding a member, a new optional member, or a new enum value | **MINOR** |
+| Documentation or clarification only, no shape change | **PATCH** |
+
+**Consumers must handle two different kinds of change differently:**
+
+| Change | Reader requirement |
+| --- | --- |
+| **Unknown member** (a field the reader does not know) | Ignore it. Additive members never change the meaning of members that already exist. |
+| **Unknown value** for a *known* member (for example a new `result.status` or `incomplete_reasons[]` entry) | Do **not** guess. Treat the scan as *indeterminate* and re-scan with a newer RepoLens, rather than mapping the value onto a neighbouring known one. |
+
+Guessing a value is the dangerous direction: coercing an unrecognized `status` or dropping an
+unrecognized `incomplete_reasons[]` entry could turn an incomplete scan into a clean one.
+
+#### Version acceptance policy
+
+`repolens.json_output.parse_json_document` applies this policy explicitly
+(`repolens.models.SUPPORTED_SCHEMA_MAJOR_VERSIONS`):
+
+| Document version | Result |
+| --- | --- |
+| Same **major** as the parser — any minor/patch, newer *or* older (for example `1.0.0`, `1.1.0`, `1.7.3`) | Accepted. Additive MINOR changes are handled per the table above. |
+| Different **major** — a newer one (`2.0.0`, `3.4.5`) or a pre-1.0 one (`0.9.0`) | Rejected with `repolens.exceptions.UnsupportedSchemaVersionError`, naming both the document version and the version this RepoLens reads. |
+| Missing, non-string, or not `MAJOR.MINOR.PATCH` | Rejected with `repolens.exceptions.ScanDocumentError`. |
+
+The version is checked **before** the rest of the document, so a future document reports "I do
+not understand this version" instead of a confusing field-level error. Both exceptions subclass
+`ValueError` (and `ScanDocumentError` subclasses `RepoLensError`), so existing `except ValueError`
+blocks keep working while callers can catch the specific type.
+
+#### Strict and forward-compatible parsing
+
+`parse_json_document` offers both readings of the policy:
+
+| Mode | Unknown members | Unknown values |
+| --- | --- | --- |
+| `strict=True` (default) | `ValidationError` | `ValidationError` |
+| `strict=False` | Ignored anywhere in the document (root, `result`, `findings[]`, `analyzer_outcomes[]`, `discovery`, …) | `UnsupportedSchemaValueError` |
+
+```python
+from repolens.exceptions import (
+    ScanDocumentError,
+    UnsupportedSchemaValueError,
+    UnsupportedSchemaVersionError,
+)
+from repolens.json_output import parse_json_document
+
+try:
+    parsed = parse_json_document(text, strict=False)  # tolerate additive MINOR changes
+except UnsupportedSchemaVersionError:
+    ...   # written by a different MAJOR schema: upgrade RepoLens / regenerate the report
+except UnsupportedSchemaValueError:
+    ...   # a value this version cannot interpret: treat the scan as indeterminate
+except ScanDocumentError:
+    ...   # not a RepoLens scan document at all
+```
+
+Limitation of `strict=False`: it only tolerates unknown **members**. An unknown value for a
+known member still stops parsing, by design — that is what keeps an unrecognized status or
+reason from silently producing a wrong clean/incomplete verdict. Missing *required* members are
+still errors in both modes; tolerating additions must not become tolerating omissions.
+
+**Current version: `1.1.0`.** It was bumped from `1.0.0` in this milestone, intentionally:
+
+- The report fields themselves did not change name, type, or meaning, so this is an *additive*
+  change.
+- The CLI now guarantees a `result` member and documents determinism, ordering, and encoding
+  rules that did not exist before, which is a real contract change for consumers.
+- Semver calls an additive change a **MINOR** bump, hence `1.1.0` rather than `2.0.0`.
+
+The version is defined once, as `repolens.models.SCHEMA_VERSION`, with
+`SCHEMA_MAJOR_VERSION` and `SUPPORTED_SCHEMA_MAJOR_VERSIONS` derived from it, and it is validated
+against the `MAJOR.MINOR.PATCH` shape so an accidental malformed value fails fast instead of
+reaching a consumer.
 
 ## Optional external tools
 
@@ -369,10 +641,29 @@ calls `ScanEngine.scan()`, and renders the resulting `ScanReport` with
 `repolens.reporting.render_report()`. To render a report you already have:
 
 ```python
+from repolens.json_output import render_json
 from repolens.reporting import RenderOptions, render_report
 
 print(render_report(report, options=RenderOptions(color=False)))
+
+# The same JSON document the CLI emits with --format json.
+print(render_json(report, exit_code=0))
 ```
+
+A document written by the CLI can be read back into validated models — the report body and the
+`result` verdict are validated separately, because `ScanReport` forbids unknown members by design:
+
+```python
+from repolens.json_output import parse_json_document
+
+text = Path("repolens-report.json").read_text(encoding="utf-8")
+parsed = parse_json_document(text)  # exact validation; add strict=False to tolerate additions
+print(parsed.report.findings[0].rule_id, parsed.result.status)
+```
+
+The parser checks `schema_version` first and refuses a document from a different major schema
+version. See [Schema versioning](#schema-versioning) for the acceptance policy and for what
+`strict=False` does and does not tolerate.
 
 ## Running Tests & Quality Checks
 
