@@ -1,401 +1,390 @@
+<div align="center">
+
+<img src="assets/social-preview.png" alt="RepoLens preview" width="850" />
+
 # RepoLens
-An open-source repository health checker for Python and JavaScript/TypeScript projects.
 
-![RepoLens — See the health of your codebase.](assets/social-preview.png)
+**Python 3.11+** &nbsp;•&nbsp; **macOS · Linux · Windows** &nbsp;•&nbsp; **Python · JavaScript · TypeScript** &nbsp;•&nbsp; **License: MIT**
 
-RepoLens helps developers identify, understand, and fix repository hygiene, configuration, code quality, dependency, and security issues before publishing or deploying a project.
+### A clean, native way to verify repository health, hygiene, and security.
 
-## Current Status — Stage 3 (Command-Line Interface)
+RepoLens inspects code quality, dependency manifests, documentation coverage, security anti-patterns, and test suite setup without executing repository code or installing packages. It operates completely offline by default, enforces strict resource limits and secret redaction, and reports deterministic findings with clear exit codes for local development and CI workflows.
 
-RepoLens is built in incremental stages. Stages 1, 2 and 3 are complete:
+> **Status:** Alpha (v0.1.0): Stages 1, 2, and 3 complete. Not yet published to PyPI.
 
-**Stage 1 — foundation and shared engine**
+</div>
 
-- **Validated report schema (`repolens.models`):** Strict Pydantic v2 models (`Finding`, `AIAdvisory`, `AnalyzerOutcome`, `ScanReport`) with structural separation between deterministic scanner findings and future opt-in AI advisories.
-- **Safe repository discovery (`repolens.discovery`):** Canonical root enforcement, symlink escape rejection, TOCTOU `O_NOFOLLOW` file reads, sensitive-file read blocks (`.env*`, private keys, credential files), `.gitignore` evaluation, and file/byte resource caps.
-- **Evidence secret redaction (`repolens.redaction`):** Automatic scrubbing of API keys, tokens, private keys, JWTs, and credential URLs before evidence or error messages enter a report.
-- **Hardened subprocess runner (`repolens.subprocess_runner`):** `shell=False` execution, allowlist-only environment sanitization, output byte caps, and process-group timeouts for external static analyzers.
-- **Shared scan engine and structure analyzer (`repolens.engine`, `repolens.analyzers.structure`).**
+---
 
-**Stage 2 — practical static analysis**
+## What it does
 
-- **Python (`Ruff`, `Bandit`)** lint/syntax/quality diagnostics and common security anti-patterns, normalized into the shared `Finding` model.
-- **JavaScript/TypeScript (`Biome`)** lint diagnostics with a hardened, RepoLens-owned configuration.
-- **Offline dependency hygiene** for Python and npm manifests and lockfiles, plus **opt-in OSV.dev** known-vulnerability lookups.
-- **Documentation and testing hygiene** checks (README/license cross-references, test presence, runner/coverage configuration).
-- **Fault-isolated analyzer lifecycle** distinguishing completed, skipped, unavailable, timed-out, and failed checks.
+RepoLens performs a fully offline, static scan of a repository directory. It runs a pipeline of analyzers against the discovered files and produces a structured report of findings grouped by severity.
 
-**Stage 3 — command-line interface**
+```mermaid
+flowchart TD
+    A["CLI: repolens scan PATH"] --> B["ScanEngine"]
+    B --> C["Discovery\n(safe file walk)"]
+    C --> D["RepositoryContext\n(files, languages, .gitignore)"]
+    D --> E["Analyzer Pipeline"]
+    E --> F["Structure Analyzer"]
+    E --> G["Python Lint\n(Ruff + Bandit)"]
+    E --> H["JS/TS Lint\n(Biome)"]
+    E --> I["Dependency Analyzer"]
+    E --> J["Documentation Analyzer"]
+    E --> K["Testing Analyzer"]
+    E --> L["OSV Advisor\n(opt-in, network)"]
+    F & G & H & I & J & K & L --> M["ScanReport\n(findings, outcomes, summary)"]
+    M --> N["Terminal Reporter"]
+    N --> O["stdout + exit code"]
+```
 
-- **`repolens` executable** (`repolens.cli`) configured through `[project.scripts]`, with `repolens --help`, `repolens --version`, and `repolens scan [PATH]`.
-- **Terminal reporter** (`repolens.reporting`) showing findings by severity with rule ID, location, message, a per-analyzer status table, severity counts, and an overall result.
-- **Documented exit-code policy** that distinguishes clean scans, detected findings, invalid input, operational failures, and interrupts.
-- **No new dependencies:** the CLI is built on the Python standard library (`argparse`).
+### Analyzer categories
 
-### Roadmap
+| Category | What it checks |
+| --- | --- |
+| Structure | LICENSE, README, `.gitignore` coverage, unignored vendor or secret directories, manifests, lockfiles, binary bloat |
+| Code quality | Python syntax and style via Ruff; JavaScript and TypeScript lint via Biome |
+| Security | Python security anti-patterns via Bandit; known vulnerabilities via OSV.dev (opt-in) |
+| Dependencies | Manifest and lockfile consistency for Python and npm; version pinning; semver range drift |
+| Documentation | Manifest references to missing README or license files; broken relative links in README; SPDX license mismatches |
+| Testing | Test directory presence, runner configuration, coverage tooling, pytest declared as a dependency |
 
-- **Stage 1 (Complete):** Project foundation, shared analysis engine, structure analyzer, and test suite.
-- **Stage 2 (Complete):** Python (`Ruff`, `Bandit`) and JavaScript/TypeScript (`Biome`) analyzer adapters, manifest/lockfile and OSV dependency checks, documentation and static test checks.
-- **Stage 3 (Complete):** Command-line interface (`repolens scan`) and terminal reporter. JSON and Markdown reporters remain future work.
-- **Stage 4:** Strict opt-in Gemini advisory explanations.
-- **Stage 5:** FastAPI + HTML/HTMX web interface for GitHub archive and ZIP scanning.
-- **Stage 6:** Container isolation hardening, and public beta.
+---
+
+## Features
+
+- **No code execution.** RepoLens never runs `setup.py`, npm scripts, test suites, or any code from the scanned repository.
+- **No automatic installs.** External tools (Ruff, Bandit, Biome) are optional and never installed by RepoLens.
+- **Safe discovery.** The file walker rejects symlinks, blocks reads of sensitive files (`.env`, SSH keys, PEM files), enforces per-file and total byte budgets, and applies `.gitignore` rules.
+- **Secret redaction.** Evidence and error messages are scrubbed of API keys, tokens, private keys, JWTs, and credential URLs before they enter any report.
+- **Fault-isolated analyzers.** A failing or timed-out analyzer never aborts the rest of the scan. Each outcome is recorded independently.
+- **Deterministic output.** Findings are deduplicated by SHA-256 fingerprint and sorted by severity, category, location, and rule ID. The same repository always produces the same report.
+- **Structured exit codes.** Exit codes distinguish clean scans, detected findings, usage errors, operational failures, and interrupts. CI pipelines can act on each case without parsing output.
+- **Programmatic API.** `ScanEngine` and `ScanReport` are fully usable as a library. The CLI is a thin wrapper.
+
+---
 
 ## Requirements
 
-- Python `>= 3.11`
-- Linux, macOS, or Windows. Continuous integration runs the full suite and the quality gates on Ubuntu and Windows for Python 3.11, 3.12, and 3.13.
+- Python 3.11 or later
+- Linux, macOS, or Windows
 
-RepoLens itself has no runtime requirement on Ruff, Bandit, Biome, Node.js, or network access. External tools and OSV.dev are strictly optional.
+Runtime dependencies:
+
+| Package | Version | Role |
+| --- | --- | --- |
+| `pydantic` | `>=2.7, <3.0` | Data models and validation |
+| `packaging` | `>=24.0, <27.0` | PEP 508 requirement parsing |
+
+Optional external tools (installed separately):
+
+| Tool | Install | Enables |
+| --- | --- | --- |
+| Ruff | `pip install ruff` | Python lint and syntax checks |
+| Bandit | `pip install bandit` | Python security checks |
+| Biome | `npm install -g @biomejs/biome` | JavaScript/TypeScript lint |
+
+---
 
 ## Installation
 
-RepoLens requires Python `>= 3.11`.
+RepoLens is not yet published to PyPI. Install it from the repository:
 
 ```bash
 git clone https://github.com/CalebPiusC/RepoLens.git
 cd RepoLens
+
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate         # Windows: .venv\Scripts\activate
 
-pip install .              # installs RepoLens and the `repolens` command
-pip install -e ".[dev]"    # editable install with lint/test tooling
+pip install .                     # installs RepoLens and the repolens command
 ```
 
-RepoLens is not yet published to PyPI; install it from the repository (add `.[tools]` to pull
-in Ruff and Bandit). Every invocation can also be run without the console script via
-`python -m repolens`.
-
-## Command-Line Usage
+To include Ruff and Bandit for Python analysis:
 
 ```bash
-$ repolens --version
-repolens 0.1.0
-
-$ repolens --help            # top-level help, commands, and exit codes
-$ repolens scan --help       # scan options and examples
+pip install ".[tools]"
 ```
 
-### Scanning a project
+To set up a full development environment:
 
 ```bash
-repolens scan .              # scan the current directory
-repolens scan ../my-service  # scan a specific project directory
+pip install -e ".[dev]"
 ```
 
-Example output (colors omitted):
+---
+
+## Usage
+
+### Quick start
+
+```bash
+repolens scan .                   # scan the current directory
+repolens scan ../my-service       # scan a specific directory
+repolens --version
+repolens --help
+repolens scan --help
+```
+
+### Example output
 
 ```text
-RepoLens 0.1.0 · my-service
+RepoLens 0.1.0 - my-service
 Target: ../my-service
-Scanned 412 file(s) · 3.4 MiB · in 812 ms · languages: python, typescript · 3 dirs excluded
+Scanned 412 file(s) - 3.4 MiB - in 812 ms - languages: python, typescript - 3 dirs excluded
 
-Findings — 2 at or above 'info' severity
-  SEVERITY  RULE           LOCATION            MESSAGE
-  MEDIUM    RL-STRUCT-001  -                   Missing repository LICENSE file
-  LOW       RL-DOC-003     README.md:12        README links to a missing path: docs/guide.md
+Findings: 2 at or above 'info' severity
+  SEVERITY  RULE           LOCATION         MESSAGE
+  MEDIUM    RL-STRUCT-001  -                Missing repository LICENSE file
+  LOW       RL-DOC-003     README.md:12     README links to a missing path: docs/guide.md
 
 Analyzers
-  STATUS     ANALYZER                   DETAIL
-  completed  repolens-structure         1 finding(s) in 4 ms
-  ...        ...                        ...
+  STATUS     ANALYZER                    DETAIL
+  completed  repolens-structure          1 finding(s) in 4 ms
+  completed  ruff-python-lint            0 finding(s) in 210 ms
+  unavailable  bandit-python-security    bandit executable was not found on PATH
 
 Summary
-  critical 0 · high 0 · medium 1 · low 1 · info 0
+  critical 0 - high 0 - medium 1 - low 1 - info 0
   total 2 finding(s)
   Result: 2 finding(s) detected at or above 'info' severity (exit code 1)
 ```
 
-The per-severity counts always describe **every** finding in the report. `--min-severity`
-only decides which findings gate the exit code; the `total` line and the `Result` line make
-the difference explicit:
-
-```text
-Summary
-  critical 0 · high 0 · medium 1 · low 0 · info 0
-  total 1 finding(s) · 0 at or above 'high' severity (1 below)
-  Result: no findings at or above 'high' severity (exit code 0)
-
-Note: only findings at or above 'high' severity affect the result; the exit code ignores
-lower severities, but every finding is counted in the summary above.
-```
-
 ### Options
 
-| Option | Description |
-| --- | --- |
-| `PATH` | Directory to scan. Defaults to `.`. Missing paths, regular files, and symlinked roots are rejected before any analyzer runs. |
-| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity affect the exit code and the `Result` line. Every finding is still listed and counted in the summary, and the `total` line reports how many are below the threshold. Default: `info`. |
-| `--max-findings N` | Maximum number of findings printed, `1`-`10000`. Default: `50`. Truncated output is announced. |
-| `--network-checks` | Enable the optional OSV.dev known-vulnerability lookups (requires network). Disabled by default. |
-| `--color {auto,always,never}` | Terminal coloring. `auto` colors only when stdout is a TTY and `NO_COLOR` is unset. Default: `auto`. |
-| `--version` / `--help` | Print version or help and exit `0`. |
+| Option | Default | Description |
+| --- | --- | --- |
+| `PATH` | `.` | Directory to scan. Symlinked roots, regular files, and missing paths are rejected before any analyzer runs. |
+| `--min-severity` | `info` | Only findings at or above this level affect the exit code and the Result line. Every finding is still listed and counted. Choices: `info`, `low`, `medium`, `high`, `critical`. |
+| `--max-findings` | `50` | Maximum number of findings printed. Range: 1 to 10,000. Truncation is announced in output. |
+| `--network-checks` | off | Enable opt-in OSV.dev known-vulnerability lookups for locked dependencies. Requires network access. |
+| `--color` | `auto` | Terminal coloring. `auto` enables color only when stdout is a TTY and `NO_COLOR` is not set. |
+| `--version` | | Print version and exit. |
+| `--help` | | Print help and exit. |
 
-Use `--min-severity` to make CI gate on meaningful issues only:
+### CI usage
 
 ```bash
-repolens scan . --min-severity high   # a repository with only medium issues exits 0
+pip install ".[tools]"
+repolens scan . --min-severity medium
 ```
+
+Use `--min-severity` to gate CI on meaningful issues only. A repository with only `low` findings exits `0` when `--min-severity medium` is set.
 
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Scan **completed over the whole repository** and no finding met the `--min-severity` threshold. |
-| `1` | At least one finding met the threshold (reported even if the scan was also incomplete). |
+| `0` | Scan completed over the whole repository; no finding met the severity threshold. |
+| `1` | At least one finding met the threshold. Reported even when the scan was also incomplete. |
 | `2` | Invalid arguments or unusable target path. Nothing was scanned. |
 | `3` | Scan could not be completed: an analyzer failed or timed out, discovery could not read the whole repository, or an internal error occurred. |
 | `130` | Scan interrupted (Ctrl-C). |
 
-Notes on the policy:
+Findings take precedence over incompleteness: exit code `1` is returned when findings are detected even if the scan is also incomplete. Only exit code `0` means clean.
 
-- `1` takes precedence over `3`: detected findings are reported even when the rest of the
-  scan was incomplete. The output says both ("… detected …, but the scan is incomplete").
-- A scan is **incomplete** when any analyzer failed or timed out, when a directory or file
-  entry could not be read (for example `EACCES`/permission denied), when discovery stopped at
-  the file-count or total-byte limit, when a subtree was nested deeper than the supported
-  walk depth, or when an analyzer only covered part of the repository because its file limit
-  was reached. An incomplete scan never exits `0`.
-- An analyzer that was **never available** (an optional tool such as Ruff, Bandit, or Biome
-  is not installed) and an analyzer that was **skipped** leave the exit code untouched, so CI
-  is not broken by missing optional tooling. Both are listed in the analyzer table with an
-  explanatory note. Install `repolens[tools]` and Biome to close those gaps.
-- A check that **started but could not complete** is different: nothing it would have covered
-  was verified, so it makes the scan incomplete (exit `3`, or `1` when findings take
-  precedence). This covers a requested network check failing mid-flight and a tool
-  disappearing between the availability probe and the run:
-  `Warning: 1 check(s) started but could not complete, so results are incomplete: …`
-- Large or deeply nested repositories that hit a resource limit can raise it through the
-  programmatic API (`ScanConfig(max_files=…, max_total_bytes=…, max_tool_files=…)`); the CLI
-  uses the defaults (10 000 files, 50 MiB in total, 2 000 files per external tool).
-- Exit codes `2` and `3` both mean "no trustworthy clean result": `2` means nothing was
-  scanned at all, `3` means scanning started but the coverage is incomplete.
+---
 
-#### Partial scans and false-clean protection
-
-Coverage gaps that could hide a finding are surfaced as warnings in the output and all make
-the scan incomplete (exit `3` unless a finding at or above the threshold takes precedence
-with exit `1`):
-
-| Situation | Reported as | Exit code |
-| --- | --- | --- |
-| Directory could not be opened (`os.scandir` raised `OSError`) | `Warning: could not read N directories, …` | `3` (or `1` with findings) |
-| Entry could not be inspected (stat/resolve failed) | `Warning: could not read … N entries, …` | `3` (or `1` with findings) |
-| File-count or byte limit reached | `Warning: discovery stopped early after reaching the … limit` | `3` (or `1` with findings) |
-| Subtree deeper than `MAX_DIRECTORY_DEPTH` (64 levels) | `Warning: discovery skipped N directories nested deeper than the supported limit of 64 levels, …` | `3` (or `1` with findings) |
-| Analyzer hit `max_tool_files`, so it linted only some files | `Warning: N analyzer(s) covered only part of the repository because a file limit was reached …` | `3` (or `1` with findings) |
-
-Deliberate policy skips are **disclosed but do not change the exit code**, because removing
-them would make ordinary repositories look broken:
-
-| Situation | Why it stays non-blocking | Disclosed as |
-| --- | --- | --- |
-| Excluded directories (`.git`, `node_modules`, `.venv`, `dist`, `build`, `out`, `target`, `coverage`, …) | Conventional VCS/vendor/build output that is not project source; the list is fixed and never read from the scanned repository's configuration | `· N dirs excluded` on the `Scanned …` line |
-| Symbolic links | Security boundary: RepoLens never follows symlinks out of the repository | `Note: N symbolic link(s) were not followed.` |
-| Files above `max_file_size_bytes` | Per-file resource cap prevents unbounded reads | `Note: N file(s) exceeded the per-file size limit and were not analyzed.` |
-
-A file that is neither a regular file nor a directory (socket, FIFO, device) is skipped
-without a counter; such entries can never contain analyzable source, so this cannot hide a
-finding. Directories skipped by the depth limit are the only "nested" case that can hide real
-source, which is why they make the scan incomplete.
-
-Typical CI usage:
-
-```bash
-pip install ".[tools]"          # or: pip install ruff bandit
-repolens scan . --min-severity medium
-```
-
-The command's own exit status is the CI result: `0` clean, `1` findings, `2`/`3`/`130` are
-errors that must fail the build as well.
-
-### Error handling
-
-Invalid paths and operational failures are printed to **stderr** as single-line messages
-without stack traces, for example:
-
-```text
-$ repolens scan /does/not/exist
-repolens: error: Repository path does not exist: /does/not/exist
-$ echo $?
-2
-```
-
-A security abort that happens *after* discovery started is not reported as a usage error
-(nothing was scanned); it exits `3` with `repolens: error: scan aborted part-way: …`, because
-part of the repository was already scanned.
-
-Unexpected internal errors are reported with the exception type and a scrubbed message plus a
-link to the issue tracker; secrets are redacted before anything is printed.
-
-`Ctrl-C` returns `130` whether it arrives during discovery, during an analyzer, or while the
-report is being rendered and printed — no traceback is shown in any of those cases.
-
-## Optional external tools
-
-RepoLens never installs tools for you and never installs anything from the scanned repository. Install these once on the machine that runs the scan if you want the corresponding analyzer:
-
-```bash
-# Python lint + security checks (already included in the `dev` extra)
-pip install "repolens[tools]"          # Bandit + Ruff
-# or explicitly:
-pip install bandit ruff
-
-# JavaScript/TypeScript lint checks (Node.js required)
-npm install --global @biomejs/biome
-```
-
-Availability is detected with a sanitized `PATH`. Missing tools are reported as `unavailable` analyzer outcomes and never abort the scan:
-
-```text
-ruff-python-lint        unavailable   `ruff` executable was not found on PATH (optional tool not installed).
-bandit-python-security  unavailable   `bandit` executable was not found on PATH (optional tool not installed).
-```
-
-## Supported checks
-
-Every finding carries a stable rule ID, a location, deterministic provenance (`FindingSource`), evidence, explanation, recommendation, and a verification step. Rule IDs prefixed with a tool name preserve that tool's own rule code.
-
-| Rule ID | Category | Severity | Check |
-| --- | --- | --- | --- |
-| `RL-STRUCT-001` … `RL-STRUCT-011` | structure | info–high | LICENSE, README, `.gitignore` coverage, unignored secrets/vendor dirs, manifests, lockfiles, binary bloat (Stage 1) |
-| `RL-STRUCT-012` | structure | low | `.gitignore` excludes lockfiles or test directories that should be committed |
-| `RL-DEP-001` | dependencies | medium | Malformed dependency lockfile |
-| `RL-DEP-002` | dependencies | medium | Invalid PEP 508 requirement in a requirements file |
-| `RL-DEP-003` | dependencies | low | npm dependency declared but not present in the lockfile |
-| `RL-DEP-004` | dependencies | medium | Locked npm version outside the declared semver range (only provable simple ranges) |
-| `RL-DEP-005` | dependencies | info | Python runtime dependencies are unpinned and not locked |
-| `RL-DEP-006` | dependencies | medium | Conflicting exact pins for the same Python distribution |
-| `RL-DEP-007` | dependencies | info | Lockfile format RepoLens cannot parse (audit coverage gap) |
-| `RL-DEP-008` | dependencies | medium | Malformed non-root dependency manifest |
-| `RL-DOC-001` / `RL-DOC-002` | documentation | medium | Manifest references a missing README or license file |
-| `RL-DOC-003` | documentation | low | README relative link points at a missing path |
-| `RL-DOC-004` | documentation | low | Declared SPDX license disagrees with LICENSE file content |
-| `RL-DOC-005` | documentation | low | Manifests declare incompatible licenses |
-| `RL-TEST-001` / `RL-TEST-002` | testing | medium | No recognizable Python / JS-TS tests despite source files |
-| `RL-TEST-003` | testing | low | Tests exist but no runner configuration is detected |
-| `RL-TEST-004` | testing | info | Coverage tooling declared but never configured |
-| `RL-TEST-005` | testing | low | `pytest` imported by tests but not declared as a dependency |
-| `RUFF-<code>` | code quality | low–high | Ruff diagnostics (`invalid-syntax` and `E9*` are high severity) |
-| `BANDIT-<id>` | security | low–high | Bandit security checks; severity/confidence and CWE are preserved |
-| `BIOME-<rule>` | code quality / security | info–medium | Biome lint diagnostics |
-| `OSV-<advisory-id>` | security | low–critical | Known vulnerability from OSV.dev for a locked package version |
-
-### Python analysis details
-
-- Ruff runs with `--isolated --no-cache --no-fix` and a fixed rule selection (`E4,E7,E9,F,B`) so repository configuration cannot silently disable checks.
-- Bandit runs from a disposable working directory with an explicit `--skip` list for checks that are dominated by false positives in application code and tests: `B101`, `B105`, `B106`, `B110`, `B112`, `B311`, `B404`, `B603`, `B607`. Use `ruff`'s `S` rules or a dedicated security review if you need them.
-- Both tools receive an explicit list of repository files that already passed discovery (no sensitive files, no oversized files, no ignored paths, no symlinks).
-
-### JavaScript/TypeScript analysis details
-
-- Biome is used only if an executable is already available; RepoLens never runs `npm install`, `pnpm install`, or any repository script.
-- RepoLens generates its own Biome configuration (`recommended` rules, VCS/ignore-file disabled) in a temporary directory and passes it via `--config-path`, so project configuration (including Biome plugins) is never loaded. Presence of project configuration is reported in the analyzer outcome message.
-- Biome's experimental JSON reporter is parsed defensively; malformed output becomes a `failed` outcome rather than a crash.
-
-### Dependency analysis details
-
-Parsed manifests and lockfiles:
-
-| Ecosystem | Manifests | Lockfiles / pins |
-| --- | --- | --- |
-| Python | `pyproject.toml` (PEP 621, Poetry, PEP 735 groups), `Pipfile`, `setup.cfg`, `requirements*.txt` / `requirements*.in` | `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock`, fully pinned requirements |
-| npm | `package.json` (`dependencies`, `devDependencies`, `optionalDependencies`, `peerDependencies`) | `package-lock.json` (v2/v3 and v1), `npm-shrinkwrap.json`, `yarn.lock` (classic and Berry), best-effort `pnpm-lock.yaml` |
-
-Notes and limitations:
-
-- `setup.py` is **never executed**, so projects that declare dependencies only in `setup.py` are not dependency-audited. `bun.lock`/`bun.lockb` are detected but not parsed (`RL-DEP-007`).
-- `pnpm-lock.yaml` parsing is best-effort and marked incomplete, so pnpm projects are not checked for manifest/lockfile drift.
-- Semver range checks only cover provable simple constraints (`^`, `~`, `=`, exact). Complex ranges, `||`, aliases, and workspace/file/git specifiers are skipped instead of guessed.
-- Paths are matched per directory, so monorepo workspaces are compared against the lockfile next to their own `package.json`.
-
-## Network-dependent behavior
-
-Known-vulnerability lookups are **disabled by default**. Enable them explicitly:
+## Programmatic API
 
 ```python
 from pathlib import Path
-from repolens import ScanConfig, ScanEngine
-
-engine = ScanEngine(config=ScanConfig(enable_network_checks=True))
-report = engine.scan(Path("."))
-```
-
-What this does:
-
-- Sends **only** package name, version, and ecosystem (e.g. `{"name": "requests", "version": "2.31.0", "ecosystem": "PyPI"}`) to `https://api.osv.dev/v1/querybatch` and `https://api.osv.dev/v1/vulns/<id>`.
-- Never sends file paths, source code, repository names, environment variables, or credentials.
-- Enforces HTTPS only, rejects redirects, applies request timeouts, a hard response-size ceiling, batch limits (100 coordinates per request), a package cap, and an advisory cap.
-- Reports service problems explicitly instead of guessing: timeouts produce a `timed_out` outcome, connection/HTTP errors produce `unavailable` marked as coverage-incomplete, and unreadable payloads produce `failed`.
-- An OSV.dev failure after the lookup started is never described as a missing optional tool: because `--network-checks` was requested explicitly, the scan exits `3` instead of reporting clean.
-- Never labels a dependency vulnerable without an advisory ID returned by OSV.dev. When OSV publishes no severity, the finding is marked medium severity with low confidence, and the explanation says the rating is estimated.
-
-Disabling network checks (default) still runs every offline check. Outcome messages state why the OSV analyzer was skipped.
-
-## Security model
-
-RepoLens is a static-analysis tool:
-
-- It never executes code from the target repository (no `setup.py`, no npm scripts, no test suites, no build steps).
-- It never installs packages from the target repository or resolves its dependencies.
-- Subprocesses are invoked with structured argument lists (`shell=False`), a sanitized environment (host secrets removed), a disposable working directory outside the repository, and both time and output-size limits. On timeout the whole process tree is terminated: a POSIX session group on Linux/macOS, and a Windows process group plus `taskkill /T` on Windows, so a wrapper (`cmd.exe` around a `.cmd` shim) cannot leave the real analyzer running.
-- Repository-provided tool configuration (`.ruff.toml`, `[tool.ruff]` in `pyproject.toml`, `.bandit`, `biome.json`/`biome.jsonc`) is not trusted or loaded.
-- Sensitive files are never read; evidence and error text pass through secret redaction before entering a report.
-- Tool-reported paths are resolved and rejected unless they stay inside the repository root; symlinks are never followed.
-- Untrusted JSON/TOML/INI is parsed defensively, including pathological nesting, and analyzer failures are isolated from the rest of the scan.
-
-### Testing hygiene policy
-
-RepoLens reports missing tests, runner configuration, and coverage setup, but it does not treat every missing optional file as a vulnerability. Absent tests are `medium`; missing runner or coverage configuration is `low`/`info`. No check inspects, installs, or runs test dependencies.
-
-## Programmatic Usage
-
-```python
-from pathlib import Path
-from repolens import ScanEngine
+from repolens import ScanEngine, ScanConfig
 
 engine = ScanEngine()
 report = engine.scan(Path("."))
 
 print(f"Scanned {report.discovery.total_files_scanned} files in {report.duration_ms:.1f} ms")
+
 for outcome in report.analyzer_outcomes:
-    print(f"{outcome.analyzer_name:24} {outcome.status.value:12} {outcome.message or ''}")
+    print(f"{outcome.analyzer_name:30} {outcome.status.value:12} {outcome.message or ''}")
+
 for finding in report.findings:
     print(f"[{finding.severity.upper()}] {finding.rule_id}: {finding.title}")
 ```
 
-The CLI is a thin front end over exactly this API: `repolens.cli` builds a `ScanConfig`,
-calls `ScanEngine.scan()`, and renders the resulting `ScanReport` with
-`repolens.reporting.render_report()`. To render a report you already have:
+To enable OSV.dev vulnerability lookups:
+
+```python
+engine = ScanEngine(config=ScanConfig(enable_network_checks=True))
+report = engine.scan(Path("."))
+```
+
+To render a report with the built-in terminal formatter:
 
 ```python
 from repolens.reporting import RenderOptions, render_report
 
-print(render_report(report, options=RenderOptions(color=False)))
+output = render_report(report, options=RenderOptions(color=False))
+print(output)
 ```
 
-## Running Tests & Quality Checks
+---
+
+## Supported rules
+
+### Structure (RL-STRUCT)
+
+| Rule ID | Severity | Check |
+| --- | --- | --- |
+| RL-STRUCT-001 | high | Missing LICENSE file |
+| RL-STRUCT-002 | medium | Missing README file |
+| RL-STRUCT-003 | medium | Missing `.gitignore` |
+| RL-STRUCT-004 | medium | Unignored secrets or credential directory |
+| RL-STRUCT-005 | medium | Unignored vendor directory (node_modules, .venv) committed |
+| RL-STRUCT-006 | low | No Python or npm manifest found |
+| RL-STRUCT-007 | low | No lockfile found alongside a manifest |
+| RL-STRUCT-008 | info | Binary or large asset file committed |
+| RL-STRUCT-009 to 011 | info-medium | Additional structure hygiene checks |
+| RL-STRUCT-012 | low | `.gitignore` excludes lockfiles or test directories that should be committed |
+
+### Dependencies (RL-DEP)
+
+| Rule ID | Severity | Check |
+| --- | --- | --- |
+| RL-DEP-001 | medium | Malformed dependency lockfile |
+| RL-DEP-002 | medium | Invalid PEP 508 requirement |
+| RL-DEP-003 | low | npm dependency declared but absent from lockfile |
+| RL-DEP-004 | medium | Locked npm version outside declared semver range |
+| RL-DEP-005 | info | Python runtime dependencies unpinned and not locked |
+| RL-DEP-006 | medium | Conflicting exact pins for the same Python distribution |
+| RL-DEP-007 | info | Lockfile format RepoLens cannot parse (coverage gap) |
+| RL-DEP-008 | medium | Malformed non-root dependency manifest |
+
+### Documentation (RL-DOC)
+
+| Rule ID | Severity | Check |
+| --- | --- | --- |
+| RL-DOC-001 | medium | Manifest references a missing README file |
+| RL-DOC-002 | medium | Manifest references a missing license file |
+| RL-DOC-003 | low | README relative link points at a missing path |
+| RL-DOC-004 | low | Declared SPDX license disagrees with LICENSE file content |
+| RL-DOC-005 | low | Manifests declare incompatible licenses |
+
+### Testing (RL-TEST)
+
+| Rule ID | Severity | Check |
+| --- | --- | --- |
+| RL-TEST-001 | medium | No Python tests found despite Python source files |
+| RL-TEST-002 | medium | No JavaScript/TypeScript tests found despite JS/TS source files |
+| RL-TEST-003 | low | Tests exist but no runner configuration detected |
+| RL-TEST-004 | info | Coverage tooling declared but not configured |
+| RL-TEST-005 | low | pytest imported in tests but not declared as a dependency |
+
+### External tool rules
+
+| Prefix | Severity range | Tool | Description |
+| --- | --- | --- | --- |
+| `RUFF-<code>` | low to high | Ruff | Python lint; E9 and invalid-syntax rules are always high |
+| `BANDIT-<id>` | low to high | Bandit | Python security checks; severity and CWE preserved |
+| `BIOME-<rule>` | info to medium | Biome | JavaScript/TypeScript lint |
+| `OSV-<advisory-id>` | low to critical | OSV.dev | Known vulnerability for a locked package version |
+
+---
+
+## Security model
+
+RepoLens is a static analysis tool designed to inspect repositories it does not trust. The key properties:
+
+- **No code execution.** `setup.py`, npm scripts, build steps, and test suites from the scanned repository are never run.
+- **No dependency installation.** RepoLens never resolves or installs packages from the target repository.
+- **Symlink rejection.** The file walker never follows symlinks. Symlinked repository roots are rejected before any scan starts. `O_NOFOLLOW` is used on every file open (TOCTOU protection).
+- **Sensitive file blocking.** Files such as `.env`, SSH private keys, PEM files, and keystore files are detected and never read. Their presence is counted and reported.
+- **Subprocess hardening.** External tools (Ruff, Bandit, Biome) are invoked with `shell=False`, a sanitized environment (host secrets stripped), a disposable working directory outside the repository, and both time and output-size limits. On timeout the entire process tree is terminated.
+- **Repository configuration isolation.** Tool configuration files (`.ruff.toml`, `pyproject.toml [tool.ruff]`, `.bandit`, `biome.json`) from the scanned repository are never loaded.
+- **Secret redaction.** API keys, tokens, private keys, JWTs, and credential URLs are scrubbed from evidence and error messages before they enter a report.
+- **Data minimization for network checks.** OSV.dev lookups send only package name, version, and ecosystem. No file paths, source code, repository names, or credentials are sent.
+
+See [docs/security/README.md](docs/security/README.md) for the full security model.
+
+---
+
+## Running tests and quality checks
 
 ```bash
+# Install development dependencies
+pip install -e ".[dev]"
+
+# Run the full test suite with coverage
 pytest --cov=repolens --cov-report=term-missing
+
+# Run lint
 ruff check src tests
+
+# Check formatting
 ruff format --check src tests
+
+# Run type checking
 mypy src tests
 ```
 
-The suite includes CLI tests that drive `main()` with a fake engine and packaging tests that
-invoke the installed entry point in a subprocess.
+The test suite does not require network access and does not require Ruff, Bandit, or Biome to be installed. External tools are exercised through stub executables placed on a temporary `PATH`. OSV.dev is replaced with an in-memory transport.
 
-The default test suite does not require network access and does not require Ruff, Bandit, or Biome to be installed: external tools are exercised through stub executables placed on a temporary `PATH`, and OSV.dev is replaced with an in-memory transport. Tests marked `network` exist only as documentation of that boundary and never call live services.
+See [tests/README.md](tests/README.md) for full test suite documentation.
 
-Stub tools are generated as Python scripts behind a native launcher (a `.cmd` shim on Windows, a shell wrapper elsewhere), so the same tests exercise the real subprocess path on every platform.
+---
 
-Two Windows environment capabilities are handled by skipping, never by weakening assertions:
+## Project structure
 
-- Symbolic-link tests are skipped when the host cannot create symlinks. Unprivileged Windows accounts may only create them with Developer Mode enabled; the Windows CI runner can, so the boundary stays covered there.
-- Tests for the 64-level `<MAX_DIRECTORY_DEPTH>` limit nest single-character directories under a short scratch root, and skip if the filesystem still refuses. Windows enforces a ~260 character path limit unless long paths are enabled, which a deep tree below pytest's own temporary directory would exceed.
+```
+RepoLens/
+├── src/repolens/
+│   ├── analyzers/          # All analyzer implementations
+│   ├── cli.py              # Command-line interface (argparse)
+│   ├── config.py           # ScanConfig and resource limits
+│   ├── discovery.py        # Safe file discovery
+│   ├── engine.py           # ScanEngine orchestrator
+│   ├── models.py           # Pydantic v2 data models
+│   ├── osv.py              # OSV.dev client
+│   ├── redaction.py        # Secret scrubbing
+│   ├── reporting.py        # Terminal reporter
+│   └── subprocess_runner.py # Hardened subprocess execution
+├── tests/
+│   ├── unit/               # Unit tests for each module
+│   ├── integration/        # End-to-end CLI and scan tests
+│   └── security/           # Boundary and safety tests
+├── docs/
+│   ├── architecture/       # Architecture overview and diagrams
+│   ├── adr/                # Architecture Decision Records
+│   ├── prd/                # Product Requirements Document
+│   ├── contributing/       # Contribution guide
+│   ├── security/           # Security model
+│   ├── rules/              # Full rules reference
+│   └── changelog/          # Version history
+├── .github/workflows/      # CI configuration
+└── pyproject.toml
+```
 
-Directory-permission tests are skipped on platforms that do not enforce `chmod` (Windows).
+---
+
+## Roadmap
+
+| Stage | Status | Description |
+| --- | --- | --- |
+| 1 | Complete | Project foundation, shared engine, structure analyzer, test suite |
+| 2 | Complete | Python and JavaScript/TypeScript analyzers, dependency checks, documentation and testing checks |
+| 3 | Complete | Command-line interface and terminal reporter |
+| 4 | Planned | Opt-in Gemini advisory explanations |
+| 5 | Planned | FastAPI + HTML/HTMX web interface for GitHub archive and ZIP scanning |
+| 6 | Planned | Container isolation hardening, public beta |
+
+---
+
+## Documentation
+
+Full documentation lives in the [docs/](docs/) folder.
+
+| Document | Description |
+| --- | --- |
+| [Architecture](docs/architecture/README.md) | System design, module overview, data flow, and security boundaries |
+| [ADRs](docs/adr/README.md) | Architecture Decision Records explaining key technical choices |
+| [PRD](docs/prd/README.md) | Product Requirements Document |
+| [Contributing](docs/contributing/README.md) | Development setup, testing, and how to write a new analyzer |
+| [Security](docs/security/README.md) | Full security model and responsible disclosure |
+| [Rules reference](docs/rules/README.md) | Every rule ID with severity and description |
+| [Changelog](docs/changelog/README.md) | Version history |
+
+---
 
 ## License
 
