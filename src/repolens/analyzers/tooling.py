@@ -66,6 +66,10 @@ def probe_tool(name: str, *, version_args: Sequence[str] = ("--version",)) -> To
             available=False,
             reason=f"`{name}` executable was not found on PATH (optional tool not installed).",
         )
+    # `shutil.which` returns a relative path when the matching `PATH` entry is relative (for
+    # example `PATH=.venv/bin:$PATH`). The tool is later executed from a different working
+    # directory, so the path is anchored to the current directory here, while it is still valid.
+    executable = str(Path(executable).resolve())
 
     version: str | None = None
     try:
