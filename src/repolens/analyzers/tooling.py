@@ -103,8 +103,13 @@ def clear_tool_cache() -> None:
 
 @contextmanager
 def tool_workspace() -> Iterator[Path]:
-    """Yield a disposable, symlink-resolved working directory for an external tool."""
-    with tempfile.TemporaryDirectory(prefix="repolens-tool-") as raw:
+    """Yield a disposable, symlink-resolved working directory for an external tool.
+
+    Cleanup tolerates a still-terminating tool process: Windows reports the directory as
+    in use while the terminated child is shutting down, and a leaked scratch directory must
+    never mask the analyzer outcome that is being reported.
+    """
+    with tempfile.TemporaryDirectory(prefix="repolens-tool-", ignore_cleanup_errors=True) as raw:
         yield Path(raw).resolve()
 
 

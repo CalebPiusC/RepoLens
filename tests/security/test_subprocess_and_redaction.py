@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -89,6 +91,32 @@ def test_subprocess_runner_enforces_timeout(tmp_path: Path) -> None:
     assert result.returncode is None
 
 
+def test_timeout_terminates_the_whole_tool_process_tree(tmp_path: Path) -> None:
+    """A timed-out tool must not leave helper processes behind (session vs. process group)."""
+    marker = tmp_path / "grandchild-survived"
+    grandchild = (
+        "import pathlib, time\n"
+        "time.sleep(3)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('alive', encoding='utf-8')\n"
+    )
+    tool = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        "time.sleep(30)\n"
+    )
+
+    result = run_safe_command(
+        [sys.executable, "-c", tool],
+        cwd=tmp_path,
+        timeout_seconds=0.8,
+    )
+
+    assert result.timed_out is True
+    # Give the grandchild more than its own sleep budget to prove it was terminated too.
+    time.sleep(4.0)
+    assert not marker.exists(), "the tool's child process outlived the terminated tool"
+
+
 def test_subprocess_runner_caps_runaway_output(tmp_path: Path) -> None:
     result = run_safe_command(
         [sys.executable, "-c", "import sys; sys.stdout.write('A' * 65536)"],
@@ -101,7 +129,9 @@ def test_subprocess_runner_caps_runaway_output(tmp_path: Path) -> None:
     assert len(result.stdout.encode("utf-8")) == 4096
 
 
-def test_subprocess_runner_rejects_shell_strings_and_unsafe_cwd(tmp_path: Path) -> None:
+def test_subprocess_runner_rejects_shell_strings_and_unsafe_cwd(
+    tmp_path: Path, make_symlink: Callable[..., Path]
+) -> None:
     with pytest.raises(SubprocessExecutionError, match="sequence"):
         run_safe_command("echo unsafe", cwd=tmp_path)
 
@@ -114,6 +144,6 @@ def test_subprocess_runner_rejects_shell_strings_and_unsafe_cwd(tmp_path: Path) 
     link_dir = tmp_path / "symlink_cwd"
     real_dir = tmp_path / "real"
     real_dir.mkdir()
-    link_dir.symlink_to(real_dir)
+    make_symlink(link_dir, real_dir, target_is_directory=True)
     with pytest.raises(SubprocessExecutionError, match="working directory"):
         run_safe_command([sys.executable, "-c", "pass"], cwd=link_dir)

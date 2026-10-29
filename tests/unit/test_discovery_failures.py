@@ -363,25 +363,20 @@ def test_oversized_files_are_counted_but_do_not_make_a_scan_incomplete(tmp_path:
     assert context.summary.is_partial is False
 
 
-def test_nesting_beyond_the_production_limit_is_reported(tmp_path: Path) -> None:
+def test_nesting_beyond_the_production_limit_is_reported(
+    short_root: Path, make_nested_directories: Callable[..., Path]
+) -> None:
     """Use the real MAX_DIRECTORY_DEPTH: no monkeypatching of the limit."""
-    repo = tmp_path / "deep-real"
+    repo = short_root / "deep-real"
     repo.mkdir()
     (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
-    current = repo
     # One directory per level, plus a final directory that the walker must refuse.
-    for index in range(MAX_DIRECTORY_DEPTH):
-        current = current / f"n{index}"
-    current.mkdir(parents=True)
-    (current / "unreachable").mkdir()
-    (current / "unreachable" / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    deepest = make_nested_directories(repo, MAX_DIRECTORY_DEPTH, leaf=("unreachable",))
+    (deepest / "broken.py").write_text("def broken(:\n", encoding="utf-8")
 
     context = discover_repository(repo, ScanConfig())
 
     assert context.summary.skipped_by_depth_count == 1
     assert context.summary.is_partial is True
     assert context.has_file("app.py")
-    depth = MAX_DIRECTORY_DEPTH
-    assert not context.has_file(
-        "/".join([*(f"n{i}" for i in range(depth)), "unreachable/broken.py"])
-    )
+    assert not context.has_file("/".join(["d"] * MAX_DIRECTORY_DEPTH + ["unreachable/broken.py"]))

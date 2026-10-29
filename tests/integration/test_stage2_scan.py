@@ -34,7 +34,8 @@ def _install_json_tool(
 ) -> None:
     install_fake_tool(
         name,
-        f'if [ "$1" = "--version" ]; then echo "{version_output}"; exit 0; fi\ncat {payload_path}',
+        f"print(Path({str(payload_path)!r}).read_text(encoding='utf-8'))\n",
+        version=version_output,
     )
 
 
@@ -195,10 +196,7 @@ def test_biome_findings_end_to_end(
 def test_tool_timeout_is_reported_and_isolated(
     tmp_path: Path, install_fake_tool: Callable[..., Path]
 ) -> None:
-    install_fake_tool(
-        "ruff",
-        'if [ "$1" = "--version" ]; then echo "ruff 0.9.7"; exit 0; fi\nsleep 30',
-    )
+    install_fake_tool("ruff", "time.sleep(30)\n", version="ruff 0.9.7")
     repo = tmp_path / "slow"
     repo.mkdir()
     _write(repo, "app.py", "import os\n")
@@ -227,8 +225,8 @@ def test_tool_crash_is_isolated_from_other_analyzers(
     _install_json_tool(install_fake_tool, "ruff", "ruff 0.9.7", ruff_json)
     install_fake_tool(
         "bandit",
-        'if [ "$1" = "--version" ]; then echo "bandit 1.9.0"; exit 0; fi\n'
-        'echo "internal error" >&2\nexit 2',
+        'sys.stderr.write("internal error\\n")\nraise SystemExit(2)\n',
+        version="bandit 1.9.0",
     )
 
     report = ScanEngine(

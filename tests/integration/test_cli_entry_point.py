@@ -222,7 +222,10 @@ def test_entry_point_unreadable_directory_is_not_reported_clean(
 
 
 def test_entry_point_reports_depth_limited_scan(
-    make_python_repo: Callable[..., Path], packaged_cli_available: bool
+    make_python_repo: Callable[..., Path],
+    make_nested_directories: Callable[..., Path],
+    short_root: Path,
+    packaged_cli_available: bool,
 ) -> None:
     """A subtree beyond MAX_DIRECTORY_DEPTH must not leave the run looking clean."""
     if not packaged_cli_available:  # pragma: no cover - environment dependent
@@ -230,15 +233,13 @@ def test_entry_point_reports_depth_limited_scan(
 
     from repolens.discovery import MAX_DIRECTORY_DEPTH
 
-    repo = make_python_repo(include_license=False)  # one MEDIUM finding
+    # The bare repo lives under a short root: 64 nested directories below pytest's own
+    # (long) tmp_path would exceed the Windows legacy path limit.
+    repo = make_python_repo(include_license=False, base_dir=short_root)  # one MEDIUM finding
     assert _run(["scan", str(repo), "--min-severity", "critical"]).returncode == 0
 
-    current = repo
-    for index in range(MAX_DIRECTORY_DEPTH):
-        current = current / f"n{index}"
-    current.mkdir(parents=True)
-    (current / "unreachable").mkdir()
-    (current / "unreachable" / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    deepest = make_nested_directories(repo, MAX_DIRECTORY_DEPTH, leaf=("unreachable",))
+    (deepest / "broken.py").write_text("def broken(:\n", encoding="utf-8")
 
     result = _run(["scan", str(repo), "--min-severity", "critical", "--color", "never"])
 

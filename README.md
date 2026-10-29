@@ -44,6 +44,7 @@ RepoLens is built in incremental stages. Stages 1, 2 and 3 are complete:
 ## Requirements
 
 - Python `>= 3.11`
+- Linux, macOS, or Windows. Continuous integration runs the full suite and the quality gates on Ubuntu and Windows for Python 3.11, 3.12, and 3.13.
 
 RepoLens itself has no runtime requirement on Ruff, Bandit, Biome, Node.js, or network access. External tools and OSV.dev are strictly optional.
 
@@ -337,7 +338,7 @@ RepoLens is a static-analysis tool:
 
 - It never executes code from the target repository (no `setup.py`, no npm scripts, no test suites, no build steps).
 - It never installs packages from the target repository or resolves its dependencies.
-- Subprocesses are invoked with structured argument lists (`shell=False`), a sanitized environment (host secrets removed), a disposable working directory outside the repository, and both time and output-size limits.
+- Subprocesses are invoked with structured argument lists (`shell=False`), a sanitized environment (host secrets removed), a disposable working directory outside the repository, and both time and output-size limits. On timeout the whole process tree is terminated: a POSIX session group on Linux/macOS, and a Windows process group plus `taskkill /T` on Windows, so a wrapper (`cmd.exe` around a `.cmd` shim) cannot leave the real analyzer running.
 - Repository-provided tool configuration (`.ruff.toml`, `[tool.ruff]` in `pyproject.toml`, `.bandit`, `biome.json`/`biome.jsonc`) is not trusted or loaded.
 - Sensitive files are never read; evidence and error text pass through secret redaction before entering a report.
 - Tool-reported paths are resolved and rejected unless they stay inside the repository root; symlinks are never followed.
@@ -386,6 +387,15 @@ The suite includes CLI tests that drive `main()` with a fake engine and packagin
 invoke the installed entry point in a subprocess.
 
 The default test suite does not require network access and does not require Ruff, Bandit, or Biome to be installed: external tools are exercised through stub executables placed on a temporary `PATH`, and OSV.dev is replaced with an in-memory transport. Tests marked `network` exist only as documentation of that boundary and never call live services.
+
+Stub tools are generated as Python scripts behind a native launcher (a `.cmd` shim on Windows, a shell wrapper elsewhere), so the same tests exercise the real subprocess path on every platform.
+
+Two Windows environment capabilities are handled by skipping, never by weakening assertions:
+
+- Symbolic-link tests are skipped when the host cannot create symlinks. Unprivileged Windows accounts may only create them with Developer Mode enabled; the Windows CI runner can, so the boundary stays covered there.
+- Tests for the 64-level `<MAX_DIRECTORY_DEPTH>` limit nest single-character directories under a short scratch root, and skip if the filesystem still refuses. Windows enforces a ~260 character path limit unless long paths are enabled, which a deep tree below pytest's own temporary directory would exceed.
+
+Directory-permission tests are skipped on platforms that do not enforce `chmod` (Windows).
 
 ## License
 

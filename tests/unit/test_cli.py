@@ -212,6 +212,8 @@ def test_path_is_expanded_for_home_directories(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # Windows expands ``~`` from USERPROFILE (via ntpath.expanduser), not HOME.
+    monkeypatch.setenv("USERPROFILE", str(home))
     fake_engine.report = make_scan_report()
 
     main(["scan", "~/", "--color", "never"])
@@ -444,12 +446,11 @@ def test_scanned_file_instead_of_directory_is_a_usage_error(
 
 
 def test_symlinked_root_is_rejected_by_the_engine(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], make_symlink: Callable[..., Path]
 ) -> None:
     real = tmp_path / "real-repo"
     real.mkdir()
-    link = tmp_path / "linked-repo"
-    link.symlink_to(real, target_is_directory=True)
+    link = make_symlink(tmp_path / "linked-repo", real, target_is_directory=True)
 
     assert main(["scan", str(link)]) == EXIT_USAGE
     assert "symbolic link" in capsys.readouterr().err
