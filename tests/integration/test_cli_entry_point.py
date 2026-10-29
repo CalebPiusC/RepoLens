@@ -306,3 +306,44 @@ def test_entry_point_json_output_is_deterministic_across_runs(
             del outcome["duration_ms"]
 
     assert first == second
+
+
+def test_entry_point_writes_a_self_contained_html_report(
+    make_python_repo: Callable[..., Path], tmp_path: Path, packaged_cli_available: bool
+) -> None:
+    """End-to-end: `--format html --output` writes one offline-ready document."""
+    if not packaged_cli_available:  # pragma: no cover - environment dependent
+        pytest.skip("repolens console script is not installed in this environment")
+    repo = make_python_repo(include_license=False)  # one MEDIUM finding
+    destination = tmp_path / "report.html"
+
+    result = _run(["scan", str(repo), "--format", "html", "--output", str(destination)])
+
+    assert result.returncode == 1, result.stderr
+    assert result.stdout == ""
+    document = destination.read_text(encoding="utf-8")
+    assert document.startswith("<!DOCTYPE html>")
+    assert document.rstrip().endswith("</html>")
+    assert "RL-STRUCT-001" in document
+    assert repo.name in document
+    assert "<script" not in document.lower()
+    assert "http://" not in document
+    assert "https://" not in document
+
+
+def test_entry_point_html_report_matches_the_json_verdict(
+    make_python_repo: Callable[..., Path], packaged_cli_available: bool
+) -> None:
+    """The HTML report and the JSON document must never disagree about the outcome."""
+    if not packaged_cli_available:  # pragma: no cover - environment dependent
+        pytest.skip("repolens console script is not installed in this environment")
+    repo = make_python_repo(include_license=False)
+
+    html_run = _run(["scan", str(repo), "--format", "html"])
+    json_document = json.loads(_run(["scan", str(repo), "--format", "json"]).stdout)
+
+    assert html_run.returncode == json_document["result"]["exit_code"]
+    assert json_document["result"]["status"] == "findings"
+    assert "Findings detected" in html_run.stdout
+    for finding in json_document["findings"]:
+        assert finding["rule_id"] in html_run.stdout

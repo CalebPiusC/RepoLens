@@ -1349,9 +1349,13 @@ def _table_row(section: str, first_cell: str) -> str:
 
 
 def _json_section(readme: str) -> str:
-    """Return the JSON output section with prose line wrapping normalised."""
+    """Return the JSON output section with prose line wrapping normalised.
+
+    The slice stops at the next top-level section, so assertions here cannot be satisfied
+    by prose that belongs to another output format (for example the HTML report).
+    """
     start = readme.index("## Machine-readable JSON output")
-    end = readme.index("## Optional external tools")
+    end = readme.index("## HTML report")
     return " ".join(readme[start:end].split())
 
 

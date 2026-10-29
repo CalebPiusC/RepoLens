@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TextIO
 
 import pytest
 
@@ -19,6 +20,7 @@ from repolens.cli import (
     EXIT_OK,
     EXIT_OPERATIONAL,
     EXIT_USAGE,
+    _emit,
     build_parser,
     determine_exit_code,
     main,
@@ -818,6 +820,292 @@ def test_invalid_format_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> 
 
 
 # --------------------------------------------------------------------------------------
+# HTML report output
+# --------------------------------------------------------------------------------------
+
+
+def test_html_format_writes_one_complete_document_to_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+
+    assert main(["scan", ".", "--format", "html"]) == EXIT_FINDINGS
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.startswith("<!DOCTYPE html>")
+    assert captured.out.rstrip().endswith("</html>")
+    assert "RL-STRUCT-001" in captured.out
+    assert "\x1b[" not in captured.out
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(captured.out)
+
+
+def test_html_format_writes_the_report_to_the_output_path(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+    destination = tmp_path / "report.html"
+
+    assert main(["scan", ".", "--format", "html", "--output", str(destination)]) == EXIT_FINDINGS
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "wrote HTML report" in captured.err
+    document = destination.read_text(encoding="utf-8")
+    assert document.startswith("<!DOCTYPE html>")
+    assert "RL-STRUCT-001" in document
+
+
+@pytest.mark.parametrize("with_findings", [False, True], ids=["clean", "findings"])
+def test_html_output_preserves_the_documented_exit_code(
+    with_findings: bool,
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    tmp_path: Path,
+) -> None:
+    expected_exit = EXIT_FINDINGS if with_findings else EXIT_OK
+    findings = [make_finding()] if with_findings else []
+    fake_engine.report = make_scan_report(findings=findings)
+
+    exit_code = main(["scan", ".", "--format", "html", "--output", str(tmp_path / "report.html")])
+
+    assert exit_code == expected_exit
+
+
+def test_html_output_is_written_atomically_and_replaces_an_existing_file(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report()
+    destination = tmp_path / "report.html"
+    destination.write_text("stale content", encoding="utf-8")
+
+    assert main(["scan", ".", "--format", "html", "--output", str(destination)]) == EXIT_OK
+
+    assert "stale content" not in destination.read_text(encoding="utf-8")
+    assert list(tmp_path.glob(".report.html.*")) == []
+    capsys.readouterr()
+
+
+def test_output_requires_the_html_format(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report()
+
+    assert main(["scan", ".", "--output", str(tmp_path / "report.html")]) == EXIT_USAGE
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--output requires --format html" in captured.err
+    assert fake_engine.calls == []
+
+
+def test_unwritable_output_path_is_an_operational_error(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report()
+    missing_directory = tmp_path / "does-not-exist" / "report.html"
+
+    code = main(["scan", ".", "--format", "html", "--output", str(missing_directory)])
+
+    assert code == EXIT_OPERATIONAL
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "could not write" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_failed_output_write_wins_over_the_findings_exit_code(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A report that was never written must not be reported as a usable result."""
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+    missing_directory = tmp_path / "does-not-exist" / "report.html"
+
+    code = main(["scan", ".", "--format", "html", "--output", str(missing_directory)])
+
+    assert code == EXIT_OPERATIONAL
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "could not write" in captured.err
+
+
+def test_output_can_be_a_bare_relative_filename(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report()
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["scan", ".", "--format", "html", "--output", "report.html"]) == EXIT_OK
+
+    assert (tmp_path / "report.html").read_text(encoding="utf-8").startswith("<!DOCTYPE html>")
+    capsys.readouterr()
+
+
+def test_output_does_not_follow_a_symlinked_destination(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_symlink: Callable[..., Path],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The report must replace the link itself, never write through it to another file."""
+    fake_engine.report = make_scan_report()
+    target = tmp_path / "elsewhere.txt"
+    target.write_text("keep me", encoding="utf-8")
+    link = make_symlink(tmp_path / "report.html", target)
+
+    assert main(["scan", ".", "--format", "html", "--output", str(link)]) == EXIT_OK
+
+    assert target.read_text(encoding="utf-8") == "keep me"
+    assert not link.is_symlink()
+    assert link.read_text(encoding="utf-8").startswith("<!DOCTYPE html>")
+    capsys.readouterr()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not modelled on Windows")
+def test_output_file_permissions_follow_the_umask(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report()
+    destination = tmp_path / "report.html"
+    previous = os.umask(0o027)
+    try:
+        assert main(["scan", ".", "--format", "html", "--output", str(destination)]) == EXIT_OK
+    finally:
+        os.umask(previous)
+
+    assert destination.stat().st_mode & 0o777 == 0o640
+    capsys.readouterr()
+
+
+def test_output_help_documents_the_write_failure_exit_code(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(["scan", "--help"])
+
+    assert excinfo.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "exits 3" in help_text
+
+
+def test_blank_output_path_is_a_usage_error(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report()
+
+    assert main(["scan", ".", "--format", "html", "--output", "   "]) == EXIT_USAGE
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--output PATH" in captured.err
+
+
+def test_html_format_ignores_color_and_emits_no_ansi_escapes(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+
+    assert main(["scan", ".", "--format", "html", "--color", "always"]) == EXIT_FINDINGS
+
+    assert "\x1b[" not in capsys.readouterr().out
+
+
+def test_html_report_escapes_hostile_repository_content(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report(
+        findings=[make_finding(title="</title><script>alert(1)</script>")],
+        repository_name='<img src=x onerror="alert(1)">',
+    )
+
+    assert main(["scan", ".", "--format", "html"]) == EXIT_FINDINGS
+
+    out = capsys.readouterr().out
+    assert "<script" not in out.lower()
+    assert "<img" not in out.lower()
+
+
+def test_html_output_keeps_diagnostics_on_stderr(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_engine.report = make_scan_report()
+
+    assert main(["scan", ".", "--format", "html"]) == EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "<!DOCTYPE html>" in captured.out
+    # Nothing but the document is ever written to stdout.
+    assert captured.out.count("<!DOCTYPE html>") == 1
+    assert "repolens:" not in captured.out
+
+
+def test_html_output_never_truncates_findings_for_max_findings(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    findings = [make_finding(rule_id=f"RL-TEST-{index:03d}") for index in range(60)]
+    fake_engine.report = make_scan_report(findings=findings)
+
+    assert main(["scan", ".", "--format", "html", "--max-findings", "1"]) == EXIT_FINDINGS
+
+    out = capsys.readouterr().out
+    for index in range(60):
+        assert f"RL-TEST-{index:03d}" in out
+
+
+def test_output_option_is_documented_in_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(["scan", "--help"])
+
+    assert excinfo.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--output PATH" in help_text
+    assert "{text,json,html}" in help_text
+
+
+# --------------------------------------------------------------------------------------
 # Output controls
 # --------------------------------------------------------------------------------------
 
@@ -1075,3 +1363,233 @@ def test_started_check_failure_with_findings_exits_one(
     )
 
     assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+
+
+def test_nul_byte_in_the_output_path_is_a_usage_error(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """argv cannot carry a NUL, but an in-process caller can; reject it like PATH."""
+    fake_engine.report = make_scan_report()
+
+    assert main(["scan", ".", "--format", "html", "--output", "a\x00b.html"]) == EXIT_USAGE
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "NUL" in captured.err
+
+
+def test_output_to_a_directory_cleans_up_and_keeps_the_directory(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed replace must not leave a temporary file behind or damage the destination."""
+    fake_engine.report = make_scan_report()
+    destination = tmp_path / "report.html"
+    destination.mkdir()
+
+    code = main(["scan", ".", "--format", "html", "--output", str(destination)])
+
+    assert code == EXIT_OPERATIONAL
+    assert destination.is_dir()
+    assert list(tmp_path.glob(".report.html.*")) == []
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "could not write" in captured.err
+
+
+# --------------------------------------------------------------------------------------
+# Output encoding (Windows redirects stdout/stderr with the ANSI code page)
+# --------------------------------------------------------------------------------------
+
+
+def _strict_streams(
+    monkeypatch: pytest.MonkeyPatch, encoding: str
+) -> tuple[io.BytesIO, io.BytesIO]:
+    """Replace ``sys.stdout``/``sys.stderr`` with streams that refuse ``encoding`` misses.
+
+    This is how a Windows shell behaves when it redirects output to a file or pipe: the
+    stream is encoded with the ANSI code page (cp932, cp1252, ...) rather than UTF-8.
+    """
+    out_bytes, err_bytes = io.BytesIO(), io.BytesIO()
+    out = io.TextIOWrapper(out_bytes, encoding=encoding, errors="strict", newline="\n")
+    err = io.TextIOWrapper(err_bytes, encoding=encoding, errors="strict", newline="\n")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    return out_bytes, err_bytes
+
+
+def _decoded(stream: TextIO, buffer: io.BytesIO) -> str:
+    """Return the written bytes as ASCII, proving the stream never received anything else."""
+    stream.flush()
+    return buffer.getvalue().decode("ascii")
+
+
+def test_emit_writes_encodable_text_unchanged() -> None:
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="ascii", errors="strict", newline="\n")
+
+    _emit("plain ascii text", stream=stream)
+    stream.flush()
+
+    assert buffer.getvalue() == b"plain ascii text\n"
+
+
+def test_emit_degrades_characters_the_stream_cannot_encode() -> None:
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="ascii", errors="strict", newline="\n")
+
+    _emit("RepoLens 0.1.0 \u00b7 demo \u2014 ok", stream=stream)
+    stream.flush()
+
+    assert buffer.getvalue() == b"RepoLens 0.1.0 \\xb7 demo \\u2014 ok\n"
+
+
+def test_emit_handles_streams_without_a_declared_encoding() -> None:
+    stream = io.StringIO()
+
+    _emit("RepoLens 0.1.0 \u00b7 demo", stream=stream)
+
+    assert stream.getvalue() == "RepoLens 0.1.0 \u00b7 demo\n"
+
+
+def test_text_report_is_produced_on_a_cp932_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: this used to raise UnicodeEncodeError, print nothing, and exit 1."""
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+    out_bytes, err_bytes = _strict_streams(monkeypatch, "cp932")
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+    out_stream = sys.stdout
+
+    text = _decoded(out_stream, out_bytes)
+    assert text.startswith("RepoLens 0.1.0 \\xb7 sample-repo")
+    assert "RL-STRUCT-001" in text
+    assert "(exit code 1)" in text
+    assert err_bytes.getvalue() == b""
+
+
+def test_clean_scan_keeps_exit_zero_on_an_ascii_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_engine.report = make_scan_report()
+    out_bytes, _ = _strict_streams(monkeypatch, "ascii")
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OK
+
+    text = _decoded(sys.stdout, out_bytes)
+    assert "No findings detected." in text
+    assert "Coverage: complete" in text
+
+
+def test_incomplete_scan_keeps_exit_three_on_an_ascii_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_engine.report = make_scan_report(unreadable_directory_count=1)
+    out_bytes, _ = _strict_streams(monkeypatch, "ascii")
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OPERATIONAL
+
+    assert "Coverage: incomplete \\u2014 discovery_unreadable" in _decoded(sys.stdout, out_bytes)
+
+
+def test_html_report_is_complete_on_a_cp932_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+    out_bytes, err_bytes = _strict_streams(monkeypatch, "cp932")
+
+    assert main(["scan", ".", "--format", "html"]) == EXIT_FINDINGS
+
+    document = _decoded(sys.stdout, out_bytes)
+    assert document.startswith("<!DOCTYPE html>")
+    assert document.rstrip().endswith("</html>")
+    assert "RL-STRUCT-001" in document
+    assert err_bytes.getvalue() == b""
+
+
+def test_json_document_stays_machine_readable_on_a_cp932_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JSON is ASCII-only, so the bytes must be identical in every encoding."""
+    fake_engine.report = make_scan_report(findings=[make_finding(path="src/\u65e5\u672c\u8a9e.py")])
+    out_bytes, _ = _strict_streams(monkeypatch, "cp932")
+
+    assert main(["scan", ".", "--format", "json"]) == EXIT_FINDINGS
+
+    parsed = json.loads(_decoded(sys.stdout, out_bytes))
+    assert parsed["findings"][0]["location"]["path"] == "src/\u65e5\u672c\u8a9e.py"
+
+
+def test_help_is_printed_on_an_ascii_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out_bytes, _ = _strict_streams(monkeypatch, "ascii")
+
+    assert main([]) == EXIT_USAGE
+
+    text = _decoded(sys.stdout, out_bytes)
+    assert text.startswith("usage: repolens")
+    assert "COMMAND" in text
+    capsys.readouterr()
+
+
+def test_error_message_with_an_unencodable_path_stays_a_clean_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The error path must not turn a usage error into a traceback and exit 1."""
+    out_bytes, err_bytes = _strict_streams(monkeypatch, "ascii")
+    missing = tmp_path / "\u65e5\u672c\u8a9e"
+
+    assert main(["scan", str(missing)]) == EXIT_USAGE
+
+    err_stream = sys.stderr
+    message = _decoded(err_stream, err_bytes)
+    assert message.startswith("repolens: error:")
+    assert "\\u65e5\\u672c\\u8a9e" in message
+    assert "Traceback" not in message
+    assert out_bytes.getvalue() == b""
+    capsys.readouterr()
+
+
+def test_utf8_output_is_byte_identical_to_a_plain_print(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The encoding guard must not change output when the stream can encode it."""
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+
+    plain_buffer = io.BytesIO()
+    plain = io.TextIOWrapper(plain_buffer, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(sys, "stdout", plain)
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+    plain.flush()
+    expected = plain_buffer.getvalue()
+
+    guarded_buffer = io.BytesIO()
+    guarded = io.TextIOWrapper(guarded_buffer, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(sys, "stdout", guarded)
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+    guarded.flush()
+
+    assert guarded_buffer.getvalue() == expected
+    assert "\u00b7".encode() in guarded_buffer.getvalue()

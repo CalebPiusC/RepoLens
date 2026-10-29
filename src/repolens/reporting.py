@@ -7,11 +7,21 @@ that nothing beyond the already-redacted report models reaches a terminal.
 
 from __future__ import annotations
 
+import textwrap
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
 from repolens.discovery import MAX_DIRECTORY_DEPTH
-from repolens.models import AnalyzerOutcome, AnalyzerStatus, Finding, ScanReport, Severity
+from repolens.models import (
+    AnalyzerOutcome,
+    AnalyzerStatus,
+    Finding,
+    IncompleteReason,
+    ScanReport,
+    Severity,
+)
 
 _MAX_MESSAGE_CHARS: Final = 108
 _MAX_ANALYZER_MESSAGE_CHARS: Final = 88
@@ -53,6 +63,11 @@ _STATUS_STYLES: Final[dict[AnalyzerStatus, str]] = {
 }
 
 _EMPTY_CELL: Final = "-"
+# Detail blocks wrap to a fixed width so a long explanation cannot produce a wall of
+# text, and are clipped so one verbose finding cannot dominate the terminal.
+_DETAIL_WIDTH: Final = 96
+_MAX_DETAIL_TEXT_CHARS: Final = 320
+_MAX_DETAIL_LOCATION_CHARS: Final = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +183,34 @@ def evaluate(report: ScanReport, min_severity: Severity = Severity.INFO) -> Scan
     )
 
 
+def incomplete_reasons(verdict: ScanVerdict) -> tuple[IncompleteReason, ...]:
+    """Return the de-duplicated reasons ``verdict`` is incomplete, in a fixed order.
+
+    This is the single source of truth for *why* a scan is incomplete: the terminal report,
+    the HTML report, and the JSON ``result.incomplete_reasons`` member all read it, so the
+    three formats cannot disagree about coverage. The order is the declaration order of
+    :class:`~repolens.models.IncompleteReason` — deliberately not alphabetical, and
+    independent of analyzer order.
+    """
+    reasons: set[IncompleteReason] = set()
+    for outcome in verdict.incomplete_analyzers:
+        if outcome.status is AnalyzerStatus.FAILED:
+            reasons.add(IncompleteReason.ANALYZER_FAILED)
+        elif outcome.status is AnalyzerStatus.TIMED_OUT:
+            reasons.add(IncompleteReason.ANALYZER_TIMED_OUT)
+    if verdict.partial_coverage_analyzers:
+        reasons.add(IncompleteReason.ANALYZER_COVERAGE_TRUNCATED)
+    if verdict.aborted_checks:
+        reasons.add(IncompleteReason.CHECK_ABORTED)
+    if verdict.discovery_failures:
+        reasons.add(IncompleteReason.DISCOVERY_UNREADABLE)
+    if verdict.discovery_truncated:
+        reasons.add(IncompleteReason.DISCOVERY_TRUNCATED)
+    if verdict.discovery_depth_limited:
+        reasons.add(IncompleteReason.DISCOVERY_DEPTH_LIMITED)
+    return tuple(member for member in IncompleteReason if member in reasons)
+
+
 def format_bytes(size_bytes: int) -> str:
     """Format a byte count using binary units."""
     if size_bytes < 1024:
@@ -199,6 +242,7 @@ def render_report(
     if target_path:
         lines.append(paint(f"Target: {target_path}", _DIM))
     lines.append(_render_discovery(report, paint))
+    lines.append(_render_coverage(verdict, paint))
     lines.append("")
     lines.extend(_render_findings(verdict, opts, paint))
     lines.append("")
@@ -233,6 +277,15 @@ def _render_discovery(report: ScanReport, paint: _Painter) -> str:
         # reader should still see that directories were left out of the count.
         parts.append(f"{_count_label(discovery.skipped_excluded_count, 'dir', 'dirs')} excluded")
     return paint(" · ".join(parts), _DIM)
+
+
+def _render_coverage(verdict: ScanVerdict, paint: _Painter) -> str:
+    """State plainly whether the scan covered everything it set out to check."""
+    reasons = incomplete_reasons(verdict)
+    if not reasons:
+        return paint("Coverage: complete", _GREEN)
+    detail = ", ".join(reason.value for reason in reasons)
+    return paint(f"Coverage: incomplete — {detail}", _RED)
 
 
 def _render_findings(verdict: ScanVerdict, opts: RenderOptions, paint: _Painter) -> list[str]:
@@ -291,18 +344,70 @@ def _render_findings(verdict: ScanVerdict, opts: RenderOptions, paint: _Painter)
                 _DIM,
             )
         )
+    lines.extend(_render_finding_details(shown, paint))
     return lines
 
 
+def _render_finding_details(findings: Sequence[Finding], paint: _Painter) -> list[str]:
+    """Explain the shown findings: the table indexes them, these blocks make them actionable."""
+    if not findings:
+        return []
+    lines = ["", paint("Details", _BOLD)]
+    for finding in findings:
+        heading = (
+            f"  {finding.severity.value.upper()} · {_clip(finding.rule_id, _MAX_RULE_CHARS)} · "
+            f"{_clip(_format_location(finding), _MAX_DETAIL_LOCATION_CHARS)}"
+        )
+        lines.append(paint(heading, _SEVERITY_STYLES[finding.severity]))
+        lines.extend(_wrapped("", finding.title))
+        lines.extend(_wrapped("Why: ", finding.explanation))
+        lines.extend(_wrapped("Fix: ", finding.recommendation))
+    return lines
+
+
+def _wrapped(label: str, text: str) -> list[str]:
+    """Wrap one detail paragraph with a hanging indent, clipped to keep output compact."""
+    prefix = "    " + label
+    cleaned = _clip(text, _MAX_DETAIL_TEXT_CHARS)
+    if not cleaned:
+        return [prefix.rstrip()]
+    return textwrap.wrap(
+        cleaned,
+        width=_DETAIL_WIDTH,
+        initial_indent=prefix,
+        subsequent_indent=" " * len(prefix),
+    )
+
+
 def _render_analyzers(report: ScanReport, paint: _Painter) -> list[str]:
-    if not report.analyzer_outcomes:
+    """Summarize analyzer outcomes; expand only the ones that need attention."""
+    outcomes = report.analyzer_outcomes
+    if not outcomes:
         return [paint("Analyzers", _BOLD), "  No analyzers were registered."]
 
+    counts = Counter(outcome.status for outcome in outcomes)
+    summary = " · ".join(
+        f"{counts[status]} {status.value}" for status in AnalyzerStatus if counts[status]
+    )
+    lines = [f"{paint('Analyzers', _BOLD)} — {summary}"]
+
+    # Completed-and-complete analyzers contribute nothing a reader has to act on, so they
+    # stay in the summary line instead of adding a row each.
+    attention = [
+        outcome
+        for outcome in outcomes
+        if outcome.status is not AnalyzerStatus.COMPLETED
+        or outcome.coverage_truncated
+        or outcome.coverage_incomplete
+    ]
+    if not attention:
+        return lines
+
     rows: list[tuple[str, str, str, str]] = []
-    for outcome in report.analyzer_outcomes:
+    for outcome in attention:
         detail = outcome.message or ""
-        if outcome.status is AnalyzerStatus.COMPLETED:
-            detail = f"{outcome.findings_count} finding(s) in {outcome.duration_ms:.0f} ms"
+        if outcome.coverage_truncated and outcome.status is AnalyzerStatus.COMPLETED:
+            detail = "covered only part of the repository (built-in limit reached)"
         style = _STATUS_STYLES[outcome.status]
         if outcome.coverage_incomplete:
             # Started and failed: as serious as a failure, not a soft "not installed".
@@ -318,8 +423,7 @@ def _render_analyzers(report: ScanReport, paint: _Painter) -> list[str]:
 
     headers = ("STATUS", "ANALYZER", "DETAIL")
     widths = [max(len(cell[index]) for cell in [*rows, headers]) for index in range(len(headers))]
-
-    lines = [paint("Analyzers", _BOLD), _row(headers, widths)]
+    lines.append(_row(headers, widths))
     for row in rows:
         cells = [
             paint(row[0].ljust(widths[0]), row[3]),
