@@ -6,6 +6,7 @@ so packaging, entry-point registration, and real exit codes are exercised end to
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from repolens import __version__
+from repolens import SCHEMA_VERSION, __version__
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src"
@@ -247,3 +248,61 @@ def test_entry_point_reports_depth_limited_scan(
     assert "nested deeper than the supported limit" in result.stdout
     assert "cannot be reported as clean" in result.stdout
     assert "exit code 3" in result.stdout
+
+
+def test_entry_point_json_output_is_machine_readable(
+    make_python_repo: Callable[..., Path], packaged_cli_available: bool
+) -> None:
+    """End-to-end: stdout must parse as one document and agree with the exit status."""
+    if not packaged_cli_available:  # pragma: no cover - environment dependent
+        pytest.skip("repolens console script is not installed in this environment")
+    repo = make_python_repo(include_license=False)  # one MEDIUM finding
+
+    result = _run(["scan", str(repo), "--format", "json"])
+
+    assert result.returncode == 1, result.stderr
+    assert result.stderr == ""
+    document = json.loads(result.stdout)
+    assert document["schema_version"] == SCHEMA_VERSION
+    assert document["repository_name"] == repo.name
+    assert document["result"]["exit_code"] == result.returncode
+    assert document["result"]["status"] == "findings"
+    assert [finding["rule_id"] for finding in document["findings"]] == ["RL-STRUCT-001"]
+    assert "\\x1b[" not in result.stdout
+    # The human-readable report must not leak into the JSON stream.
+    assert "Summary" not in result.stdout
+    assert "RepoLens 0.1.0" not in result.stdout
+
+
+def test_entry_point_json_output_keeps_errors_off_stdout(
+    tmp_path: Path, packaged_cli_available: bool
+) -> None:
+    if not packaged_cli_available:  # pragma: no cover - environment dependent
+        pytest.skip("repolens console script is not installed in this environment")
+
+    result = _run(["scan", str(tmp_path / "missing"), "--format", "json"])
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "error:" in result.stderr
+
+
+def test_entry_point_json_output_is_deterministic_across_runs(
+    make_python_repo: Callable[..., Path], packaged_cli_available: bool
+) -> None:
+    """Two scans of identical content differ only in the timestamp and the duration."""
+    if not packaged_cli_available:  # pragma: no cover - environment dependent
+        pytest.skip("repolens console script is not installed in this environment")
+    repo = make_python_repo()
+
+    first = json.loads(_run(["scan", str(repo), "--format", "json"]).stdout)
+    second = json.loads(_run(["scan", str(repo), "--format", "json"]).stdout)
+
+    volatile = ("scanned_at", "duration_ms")
+    for document in (first, second):
+        for key in volatile:
+            del document[key]
+        for outcome in document["analyzer_outcomes"]:
+            del outcome["duration_ms"]
+
+    assert first == second

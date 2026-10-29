@@ -21,6 +21,7 @@ from repolens import __version__
 from repolens.config import ScanConfig
 from repolens.engine import ScanEngine
 from repolens.exceptions import DiscoveryAbortedError, DiscoveryError, RepoLensError
+from repolens.json_output import render_json
 from repolens.models import ScanReport, Severity
 from repolens.redaction import redact_secrets
 from repolens.reporting import RenderOptions, evaluate, render_report
@@ -59,6 +60,11 @@ exit codes:
 
 Exit codes 2 and 3 both mean "do not trust a clean result"; only 0 means clean.
 
+Output formats:
+  text   human-readable report with an analyzer table and a summary (default)
+  json   one machine-readable JSON document on stdout, with no color and no progress
+         text; diagnostics still go to stderr and the exit codes above are unchanged
+
 RepoLens is a static analyzer: it never executes code, installs dependencies, or runs
 test suites from the repository it scans.
 """
@@ -71,6 +77,7 @@ examples:
                                   only fail on high or critical findings
   repolens scan . --network-checks
                                   enable optional OSV.dev vulnerability lookups
+  repolens scan . --format json   machine-readable output for CI and tooling
 """
 
 
@@ -153,6 +160,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="colorize output; auto enables color only on a terminal (default: auto)",
     )
     scan_parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        metavar="{text,json}",
+        help="output format: 'text' for the human-readable report, 'json' for one "
+        "machine-readable document on stdout (always complete, never colorized) "
+        "(default: text)",
+    )
+    scan_parser.add_argument(
         "--network-checks",
         action="store_true",
         help="enable optional OSV.dev known-vulnerability lookups for locked dependencies "
@@ -206,11 +222,13 @@ class _ScanCommand:
         config: ScanConfig,
         options: RenderOptions,
         color_mode: str,
+        output_format: str,
     ) -> None:
         self.target = target
         self.config = config
         self.options = options
         self.color_mode = color_mode
+        self.output_format = output_format
 
     def run(self, *, stdout: TextIO, stderr: TextIO) -> int:
         """Execute the scan, print the report, and return the exit code."""
@@ -244,6 +262,19 @@ class _ScanCommand:
             return EXIT_OPERATIONAL
 
         exit_code = determine_exit_code(report, self.options.min_severity)
+        if self.output_format == "json":
+            # Machine output: exactly one JSON document on stdout. No color, no banner, no
+            # analyzer table, and no ``--max-findings`` truncation (see repolens.json_output).
+            print(
+                render_json(
+                    report,
+                    exit_code=exit_code,
+                    min_severity=self.options.min_severity,
+                ),
+                file=stdout,
+            )
+            return exit_code
+
         options = RenderOptions(
             color=_use_color(self.color_mode, stdout),
             min_severity=self.options.min_severity,
@@ -277,6 +308,7 @@ def _scan_command(args: argparse.Namespace) -> _ScanCommand:
             max_findings=int(args.max_findings),
         ),
         color_mode=str(args.color),
+        output_format=str(args.format),
     )
 
 
