@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TextIO
 
 import pytest
 
@@ -19,6 +20,7 @@ from repolens.cli import (
     EXIT_OK,
     EXIT_OPERATIONAL,
     EXIT_USAGE,
+    _emit,
     build_parser,
     determine_exit_code,
     main,
@@ -1397,3 +1399,197 @@ def test_output_to_a_directory_cleans_up_and_keeps_the_directory(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "could not write" in captured.err
+
+
+# --------------------------------------------------------------------------------------
+# Output encoding (Windows redirects stdout/stderr with the ANSI code page)
+# --------------------------------------------------------------------------------------
+
+
+def _strict_streams(
+    monkeypatch: pytest.MonkeyPatch, encoding: str
+) -> tuple[io.BytesIO, io.BytesIO]:
+    """Replace ``sys.stdout``/``sys.stderr`` with streams that refuse ``encoding`` misses.
+
+    This is how a Windows shell behaves when it redirects output to a file or pipe: the
+    stream is encoded with the ANSI code page (cp932, cp1252, ...) rather than UTF-8.
+    """
+    out_bytes, err_bytes = io.BytesIO(), io.BytesIO()
+    out = io.TextIOWrapper(out_bytes, encoding=encoding, errors="strict", newline="\n")
+    err = io.TextIOWrapper(err_bytes, encoding=encoding, errors="strict", newline="\n")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    return out_bytes, err_bytes
+
+
+def _decoded(stream: TextIO, buffer: io.BytesIO) -> str:
+    """Return the written bytes as ASCII, proving the stream never received anything else."""
+    stream.flush()
+    return buffer.getvalue().decode("ascii")
+
+
+def test_emit_writes_encodable_text_unchanged() -> None:
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="ascii", errors="strict", newline="\n")
+
+    _emit("plain ascii text", stream=stream)
+    stream.flush()
+
+    assert buffer.getvalue() == b"plain ascii text\n"
+
+
+def test_emit_degrades_characters_the_stream_cannot_encode() -> None:
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="ascii", errors="strict", newline="\n")
+
+    _emit("RepoLens 0.1.0 \u00b7 demo \u2014 ok", stream=stream)
+    stream.flush()
+
+    assert buffer.getvalue() == b"RepoLens 0.1.0 \\xb7 demo \\u2014 ok\n"
+
+
+def test_emit_handles_streams_without_a_declared_encoding() -> None:
+    stream = io.StringIO()
+
+    _emit("RepoLens 0.1.0 \u00b7 demo", stream=stream)
+
+    assert stream.getvalue() == "RepoLens 0.1.0 \u00b7 demo\n"
+
+
+def test_text_report_is_produced_on_a_cp932_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: this used to raise UnicodeEncodeError, print nothing, and exit 1."""
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+    out_bytes, err_bytes = _strict_streams(monkeypatch, "cp932")
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+    out_stream = sys.stdout
+
+    text = _decoded(out_stream, out_bytes)
+    assert text.startswith("RepoLens 0.1.0 \\xb7 sample-repo")
+    assert "RL-STRUCT-001" in text
+    assert "(exit code 1)" in text
+    assert err_bytes.getvalue() == b""
+
+
+def test_clean_scan_keeps_exit_zero_on_an_ascii_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_engine.report = make_scan_report()
+    out_bytes, _ = _strict_streams(monkeypatch, "ascii")
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OK
+
+    text = _decoded(sys.stdout, out_bytes)
+    assert "No findings detected." in text
+    assert "Coverage: complete" in text
+
+
+def test_incomplete_scan_keeps_exit_three_on_an_ascii_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_engine.report = make_scan_report(unreadable_directory_count=1)
+    out_bytes, _ = _strict_streams(monkeypatch, "ascii")
+
+    assert main(["scan", ".", "--color", "never"]) == EXIT_OPERATIONAL
+
+    assert "Coverage: incomplete \\u2014 discovery_unreadable" in _decoded(sys.stdout, out_bytes)
+
+
+def test_html_report_is_complete_on_a_cp932_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+    out_bytes, err_bytes = _strict_streams(monkeypatch, "cp932")
+
+    assert main(["scan", ".", "--format", "html"]) == EXIT_FINDINGS
+
+    document = _decoded(sys.stdout, out_bytes)
+    assert document.startswith("<!DOCTYPE html>")
+    assert document.rstrip().endswith("</html>")
+    assert "RL-STRUCT-001" in document
+    assert err_bytes.getvalue() == b""
+
+
+def test_json_document_stays_machine_readable_on_a_cp932_stdout(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JSON is ASCII-only, so the bytes must be identical in every encoding."""
+    fake_engine.report = make_scan_report(findings=[make_finding(path="src/\u65e5\u672c\u8a9e.py")])
+    out_bytes, _ = _strict_streams(monkeypatch, "cp932")
+
+    assert main(["scan", ".", "--format", "json"]) == EXIT_FINDINGS
+
+    parsed = json.loads(_decoded(sys.stdout, out_bytes))
+    assert parsed["findings"][0]["location"]["path"] == "src/\u65e5\u672c\u8a9e.py"
+
+
+def test_help_is_printed_on_an_ascii_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out_bytes, _ = _strict_streams(monkeypatch, "ascii")
+
+    assert main([]) == EXIT_USAGE
+
+    text = _decoded(sys.stdout, out_bytes)
+    assert text.startswith("usage: repolens")
+    assert "COMMAND" in text
+    capsys.readouterr()
+
+
+def test_error_message_with_an_unencodable_path_stays_a_clean_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The error path must not turn a usage error into a traceback and exit 1."""
+    out_bytes, err_bytes = _strict_streams(monkeypatch, "ascii")
+    missing = tmp_path / "\u65e5\u672c\u8a9e"
+
+    assert main(["scan", str(missing)]) == EXIT_USAGE
+
+    err_stream = sys.stderr
+    message = _decoded(err_stream, err_bytes)
+    assert message.startswith("repolens: error:")
+    assert "\\u65e5\\u672c\\u8a9e" in message
+    assert "Traceback" not in message
+    assert out_bytes.getvalue() == b""
+    capsys.readouterr()
+
+
+def test_utf8_output_is_byte_identical_to_a_plain_print(
+    fake_engine: type[_FakeEngine],
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The encoding guard must not change output when the stream can encode it."""
+    fake_engine.report = make_scan_report(findings=[make_finding()])
+
+    plain_buffer = io.BytesIO()
+    plain = io.TextIOWrapper(plain_buffer, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(sys, "stdout", plain)
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+    plain.flush()
+    expected = plain_buffer.getvalue()
+
+    guarded_buffer = io.BytesIO()
+    guarded = io.TextIOWrapper(guarded_buffer, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(sys, "stdout", guarded)
+    assert main(["scan", ".", "--color", "never"]) == EXIT_FINDINGS
+    guarded.flush()
+
+    assert guarded_buffer.getvalue() == expected
+    assert "\u00b7".encode() in guarded_buffer.getvalue()

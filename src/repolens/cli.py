@@ -203,7 +203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return _main(argv)
     except KeyboardInterrupt:
-        print("\nrepolens: interrupted.", file=sys.stderr)
+        _emit("\nrepolens: interrupted.", stream=sys.stderr)
         return EXIT_INTERRUPTED
 
 
@@ -216,13 +216,13 @@ def _main(argv: Sequence[str] | None = None) -> int:
 
     if args.command != "scan":
         # No command supplied: show help but signal that nothing was scanned.
-        parser.print_help(sys.stdout)
+        _emit(parser.format_help().rstrip("\n"), stream=sys.stdout)
         return EXIT_USAGE
 
     try:
         command = _scan_command(args)
     except _UsageError as exc:
-        print(f"repolens: error: {exc}", file=sys.stderr)
+        _emit(f"repolens: error: {exc}", stream=sys.stderr)
         return EXIT_USAGE
     return command.run(stdout=sys.stdout, stderr=sys.stderr)
 
@@ -253,7 +253,7 @@ class _ScanCommand:
             return self._run(stdout=stdout, stderr=stderr)
         except KeyboardInterrupt:
             # Ctrl-C during rendering or output must behave like Ctrl-C during the scan.
-            print("\nrepolens: scan interrupted.", file=stderr)
+            _emit("\nrepolens: scan interrupted.", stream=stderr)
             return EXIT_INTERRUPTED
 
     def _run(self, *, stdout: TextIO, stderr: TextIO) -> int:
@@ -262,19 +262,19 @@ class _ScanCommand:
         except DiscoveryAbortedError as exc:
             # Discovery started and then refused to continue, so scanning did happen:
             # this is an operational failure, not a "nothing was scanned" usage error.
-            print(f"repolens: error: scan aborted part-way: {_safe(exc)}", file=stderr)
+            _emit(f"repolens: error: scan aborted part-way: {_safe(exc)}", stream=stderr)
             return EXIT_OPERATIONAL
         except DiscoveryError as exc:
-            print(f"repolens: error: {_safe(exc)}", file=stderr)
+            _emit(f"repolens: error: {_safe(exc)}", stream=stderr)
             return EXIT_USAGE
         except RepoLensError as exc:
-            print(f"repolens: error: {_safe(exc)}", file=stderr)
+            _emit(f"repolens: error: {_safe(exc)}", stream=stderr)
             return EXIT_OPERATIONAL
         except Exception as exc:
-            print(f"repolens: internal error: {_safe_unexpected(exc)}", file=stderr)
-            print(
+            _emit(f"repolens: internal error: {_safe_unexpected(exc)}", stream=stderr)
+            _emit(
                 f"repolens: this is a RepoLens bug; please report it at {_ISSUE_URL}",
-                file=stderr,
+                stream=stderr,
             )
             return EXIT_OPERATIONAL
 
@@ -282,13 +282,13 @@ class _ScanCommand:
         if self.output_format == "json":
             # Machine output: exactly one JSON document on stdout. No color, no banner, no
             # analyzer table, and no ``--max-findings`` truncation (see repolens.json_output).
-            print(
+            _emit(
                 render_json(
                     report,
                     exit_code=exit_code,
                     min_severity=self.options.min_severity,
                 ),
-                file=stdout,
+                stream=stdout,
             )
             return exit_code
 
@@ -302,19 +302,19 @@ class _ScanCommand:
                 target_path=str(self.target),
             )
             if self.output_path is None:
-                print(document, file=stdout)
+                _emit(document, stream=stdout)
                 return exit_code
             try:
                 _write_atomically(self.output_path, document)
             except OSError as exc:
                 destination = _safe_text(str(self.output_path))
-                print(
+                _emit(
                     f"repolens: error: could not write {destination}: {_safe(exc)}",
-                    file=stderr,
+                    stream=stderr,
                 )
                 return EXIT_OPERATIONAL
             written = _safe_text(str(self.output_path))
-            print(f"repolens: wrote HTML report to {written}", file=stderr)
+            _emit(f"repolens: wrote HTML report to {written}", stream=stderr)
             return exit_code
 
         options = RenderOptions(
@@ -322,14 +322,14 @@ class _ScanCommand:
             min_severity=self.options.min_severity,
             max_findings=self.options.max_findings,
         )
-        print(
+        _emit(
             render_report(
                 report,
                 options=options,
                 target_path=str(self.target),
                 exit_code=exit_code,
             ),
-            file=stdout,
+            stream=stdout,
         )
         return exit_code
 
@@ -422,6 +422,28 @@ def _use_color(mode: str, stream: TextIO) -> bool:
     if os.environ.get("TERM", "").lower() == "dumb":
         return False
     return bool(getattr(stream, "isatty", lambda: False)())
+
+
+def _emit(text: str, *, stream: TextIO) -> None:
+    r"""Write one rendered line to ``stream``, never failing on the stream's encoding.
+
+    Windows encodes stdout/stderr that are *redirected* to a file or pipe with the ANSI
+    code page (cp1252, cp932, cp936, ...), which cannot represent characters that appear
+    in RepoLens's own output (``·``, ``—``) or in repository paths and messages. A plain
+    ``print`` then raised ``UnicodeEncodeError`` *after* the scan had finished, leaving
+    the user with empty output on stdout, a traceback on stderr, and exit code ``1`` —
+    indistinguishable from "findings detected". Characters the stream cannot encode are
+    therefore written as ``\uXXXX`` escapes: the bytes stay ASCII, the report is still
+    produced, and the exit code keeps describing the scan. Anything the stream can encode
+    is written exactly as before, and JSON escapes remain valid JSON.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if encoding:
+        try:
+            text.encode(encoding)
+        except UnicodeEncodeError:
+            text = text.encode(encoding, "backslashreplace").decode(encoding)
+    print(text, file=stream)
 
 
 def _safe_text(text: str) -> str:

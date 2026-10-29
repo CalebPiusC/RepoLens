@@ -276,6 +276,31 @@ link to the issue tracker; secrets are redacted before anything is printed.
 `Ctrl-C` returns `130` whether it arrives during discovery, during an analyzer, or while the
 report is being rendered and printed — no traceback is shown in any of those cases.
 
+#### Output encoding
+
+Every format is written to stdout and stderr without ever failing on the stream's encoding.
+That matters on Windows, where a **redirected** stdout/stderr (`>`, `|`, or a CI log) is
+encoded with the ANSI code page (cp1252, cp932, cp936, …) rather than UTF-8; those code pages
+cannot represent characters that appear in RepoLens's own report (`·`, `—`) or in repository
+paths and messages. Characters the stream cannot encode are written as `\xNN`/`\uNNNN`
+escapes, so the report is still produced and the exit code still describes the scan. Output
+the stream *can* encode is written byte-for-byte as before, and `--format json` is unaffected
+because the document is ASCII-only (`ensure_ascii=True`).
+
+```text
+# Windows, cp932 console, redirected output
+$ repolens scan . > report.txt
+RepoLens 0.1.0 \xb7 my-service
+```
+
+To produce an HTML file that is always UTF-8 regardless of the console code page — recommended
+on Windows — use `--output` instead of shell redirection; it writes the file with an explicit
+UTF-8 encoding:
+
+```powershell
+repolens scan . --format html --output report.html
+```
+
 ## Machine-readable JSON output
 
 `--format json` writes exactly one JSON document to stdout and nothing else, so it can be piped
