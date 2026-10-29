@@ -247,10 +247,14 @@ def test_probe_tool_returns_an_absolute_path_for_a_relative_path_entry(
     relative. Tools are then executed from a different working directory, where that relative
     path no longer resolves, so probing must anchor the path while the current directory is
     still the one `PATH` was interpreted against.
+
+    The scan runs from a directory whose contents are addressed relatively, which is what makes
+    the anchoring observable; `os.path.relpath` is avoided because a Windows CI checkout and its
+    temporary directory can sit on different drives, where it raises `ValueError`.
     """
     install_fake_tool("relative-tool", "pass\n", version="2.4.6")
-    relative_entry = os.path.relpath(str(tmp_path / "fake-bin"), Path.cwd())
-    monkeypatch.setenv("PATH", os.pathsep.join([relative_entry, os.environ.get("PATH", "")]))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", os.pathsep.join(["fake-bin", os.environ.get("PATH", "")]))
     clear_tool_cache()
 
     availability = probe_tool("relative-tool")
