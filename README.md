@@ -341,9 +341,11 @@ library returns. There is no parallel reporting schema to drift out of sync. `re
 only added member; it is derived from the same verdict that decides the exit code, so a
 consumer never has to re-implement that policy.
 
-**Upgrading from the `1.0.0` report.** The addition of `result` is additive, but a *strict*
-reader is affected: `ScanReport` sets `extra="forbid"`, so validating the new CLI document with
-an old `ScanReport` model fails with `Extra inputs are not permitted` for the `result` member.
+### Upgrading from the `1.0.0` report
+
+The addition of `result` is additive, but a *strict* reader is affected: `ScanReport` sets
+`extra="forbid"`, so validating the new CLI document with an old `ScanReport` model fails with
+`Extra inputs are not permitted` for the `result` member.
 That is expected, not damage — the report body itself is unchanged. Three ways to handle it:
 
 ```python
@@ -366,6 +368,28 @@ parsed = parse_json_document(text, strict=False)
 Any existing field keeps its name, type, and meaning, so a reader that ignores unknown members —
 or that validates the body alone — continues to work unchanged.
 
+**The reverse direction is not automatic.** A `1.0.0`-era *document* — for example a bare
+`ScanReport.model_dump_json()`, which is only the report body — has no `result` member, so
+`parse_json_document()` rejects it with `ScanDocumentError` ("scan document is missing the
+'result' member") in **both** parsing modes. That is deliberate: a document without `result`
+carries no verdict, and inventing one would let a reader believe it had checked completeness
+when it had not. Accepting the same *major* version (below) governs how a version is judged, not
+whether an incomplete document is completed for you. To read a report-only document, validate
+the report itself:
+
+```python
+import json
+from repolens.models import ScanReport
+
+# ``text`` holds a report-only document, for example ``report.model_dump_json()``.
+report = ScanReport.model_validate(json.loads(text))
+```
+
+| Input | Has `result`? | `parse_json_document()` |
+| --- | --- | --- |
+| `repolens scan --format json` output, or `render_json(report, exit_code=…)` | Yes | Validates body and `result` separately; returns both models. |
+| `ScanReport.model_dump_json()` / `.model_dump(mode="json")` (any schema version) | No | `ScanDocumentError` — use `ScanReport.model_validate` instead. |
+
 ### `result` semantics
 
 | Member | Meaning |
@@ -375,7 +399,7 @@ or that validates the body alone — continues to work unchanged.
 | `status` | `clean`, `findings`, `incomplete`, or `findings_and_incomplete`. |
 | `has_findings` | At least one finding met the threshold. |
 | `is_complete` | Everything RepoLens set out to check was actually verified. |
-| `incomplete_reasons` | Sorted, de-duplicated reasons: `analyzer_failed`, `analyzer_timed_out`, `analyzer_coverage_truncated`, `check_aborted`, `discovery_unreadable`, `discovery_truncated`, `discovery_depth_limited`. |
+| `incomplete_reasons` | De-duplicated, in a fixed order that is the declaration order of the `IncompleteReason` enum member — **not** alphabetical: `analyzer_failed`, `analyzer_timed_out`, `analyzer_coverage_truncated`, `check_aborted`, `discovery_unreadable`, `discovery_truncated`, `discovery_depth_limited`. Compare by membership, not by position or alphabet. |
 | `findings_total` / `findings_at_or_above_threshold` | Every finding, versus the ones that gated the exit code. |
 | `counts_by_severity` / `counts_by_category` | Counts for **every** enum member including zeros, in enum order, so a key can be read unconditionally. |
 
@@ -449,7 +473,7 @@ unrecognized `incomplete_reasons[]` entry could turn an incomplete scan into a c
 
 | Document version | Result |
 | --- | --- |
-| Same **major** as the parser — any minor/patch, newer *or* older (for example `1.0.0`, `1.1.0`, `1.7.3`) | Accepted. Additive MINOR changes are handled per the table above. |
+| Same **major** as the parser — any minor/patch, newer *or* older (for example `1.0.0`, `1.1.0`, `1.7.3`) | Accepted *as a version*. Additive MINOR changes are handled per the table above. This governs how the version number is judged, not whether a document is complete: a report-only document without the `result` member is still refused (see [Upgrading from the `1.0.0` report](#upgrading-from-the-100-report)). |
 | Different **major** — a newer one (`2.0.0`, `3.4.5`) or a pre-1.0 one (`0.9.0`) | Rejected with `repolens.exceptions.UnsupportedSchemaVersionError`, naming both the document version and the version this RepoLens reads. |
 | Missing, non-string, or not `MAJOR.MINOR.PATCH` | Rejected with `repolens.exceptions.ScanDocumentError`. |
 
@@ -501,7 +525,9 @@ still errors in both modes; tolerating additions must not become tolerating omis
 The version is defined once, as `repolens.models.SCHEMA_VERSION`, with
 `SCHEMA_MAJOR_VERSION` and `SUPPORTED_SCHEMA_MAJOR_VERSIONS` derived from it, and it is validated
 against the `MAJOR.MINOR.PATCH` shape so an accidental malformed value fails fast instead of
-reaching a consumer.
+reaching a consumer. The field sets `validate_default=True`, because Pydantic does not validate
+field defaults on its own: a malformed `SCHEMA_VERSION` raises `ValidationError` when the report
+is built, rather than being emitted verbatim.
 
 ## Optional external tools
 
@@ -650,8 +676,12 @@ print(render_report(report, options=RenderOptions(color=False)))
 print(render_json(report, exit_code=0))
 ```
 
-A document written by the CLI can be read back into validated models — the report body and the
-`result` verdict are validated separately, because `ScanReport` forbids unknown members by design:
+A document written by the CLI — body **plus** `result` — can be read back into validated models:
+the report body and the `result` verdict are validated separately, because `ScanReport` forbids
+unknown members by design. `parse_json_document()` requires that `result` member, so it does not
+apply to a bare `ScanReport` dump (`report.model_dump_json()`); validate one of those with
+`ScanReport.model_validate` instead. See
+[Upgrading from the `1.0.0` report](#upgrading-from-the-100-report).
 
 ```python
 from repolens.json_output import parse_json_document

@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import json
 import re
+import types
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Final, TypeVar, get_args, get_origin
+from typing import Any, Final, TypeVar, Union, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
@@ -52,6 +53,13 @@ _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 JSON_INDENT: Final = 2
 """Indentation of the emitted document (two spaces, like the report examples in the README)."""
+
+# Annotation origins whose values map to a single value type (``dict[str, Model]`` etc.).
+_MAPPING_ORIGINS: Final = frozenset({dict, Mapping})
+# Annotation origins whose values are sequences of items (homogeneous, or positional tuples).
+_SEQUENCE_ORIGINS: Final = frozenset({list, set, frozenset, tuple})
+# Both spellings of a union: ``X | None`` from PEP 604 and ``Optional[X]`` from ``typing``.
+_UNION_ORIGINS: Final = frozenset({Union, types.UnionType})
 
 # Fixed emission order for ``incomplete_reasons``; membership, not analyzer order, decides.
 _REASON_FOR_STATUS: Final[dict[AnalyzerStatus, IncompleteReason]] = {
@@ -184,20 +192,83 @@ def _candidate_models(annotation: object) -> list[type[BaseModel]]:
     return models
 
 
+def _unwrap_optional(annotation: object) -> object:
+    """Return the single non-``None`` member of an optional union, or ``annotation`` itself.
+
+    ``X | None`` (and ``Optional[X]``) is only a union at the annotation level: at runtime the
+    value is an ``X`` or ``None``. Unwrapping it keeps ``dict[str, Model] | None`` on the
+    container path instead of letting it look like a bare model, which would strip every entry
+    of the mapping. A union with several non-``None`` members is ambiguous and is returned
+    unchanged; :func:`_project_value` then leaves the value for Pydantic to judge.
+    """
+    if get_origin(annotation) not in _UNION_ORIGINS:
+        return annotation
+    members = [member for member in get_args(annotation) if member is not type(None)]
+    return members[0] if len(members) == 1 else annotation
+
+
+def _mapping_value_type(annotation: object) -> object:
+    """Return the value type of a ``dict``/``Mapping`` annotation (``object`` if unknown)."""
+    arguments = get_args(annotation)
+    return arguments[1] if len(arguments) == 2 else object
+
+
+def _sequence_item_types(annotation: object) -> list[object]:
+    """Return the item types of a sequence annotation, in order.
+
+    A one-element list means "this type applies to every item": ``list[Model]``,
+    ``set[Model]``, and the homogeneous ``tuple[Model, ...]``. A longer list comes from a
+    fixed-length tuple and holds one type per position. An empty list means the shape is not
+    knowable, so the value is left for Pydantic to judge.
+    """
+    arguments = get_args(annotation)
+    if get_origin(annotation) is tuple:
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            return [arguments[0]]
+        return list(arguments)
+    return [arguments[0]] if len(arguments) == 1 else []
+
+
 def _project_value(annotation: object, value: Any) -> Any:
-    """Drop unknown members from ``value`` according to ``annotation``, recursively."""
+    """Drop unknown members from ``value`` according to ``annotation``, recursively.
+
+    Containers are projected *structurally*: ``list[Model]``, ``dict[K, Model]``, and tuples
+    keep their items and keys and lose only unknown *members* of the models inside. Treating a
+    mapping of submodels as if it were a single model would discard every entry, so containers
+    are handled before the "is this a model" check. An optional container
+    (``dict[K, Model] | None``, ``list[Model] | None``) is unwrapped first so it takes the same
+    path as its non-optional form.
+    """
+    if value is None:  # ``None`` is a legitimate value for every optional member
+        return None
+    annotation = _unwrap_optional(annotation)
+    origin = get_origin(annotation)
+    if origin in _UNION_ORIGINS:
+        # Several real members: the shape is genuinely ambiguous, so nothing is stripped
+        # (stripping here could silently empty a mapping). Pydantic decides, and fails loudly.
+        return value
+    if origin in _MAPPING_ORIGINS:
+        if not isinstance(value, Mapping):
+            return value
+        value_type = _mapping_value_type(annotation)
+        return {key: _project_value(value_type, item) for key, item in value.items()}
+    if origin in _SEQUENCE_ORIGINS and isinstance(value, list):
+        item_types = _sequence_item_types(annotation)
+        if len(item_types) == 1:
+            return [_project_value(item_types[0], item) for item in value]
+        if len(item_types) == len(value):
+            return [
+                _project_value(item_type, item)
+                for item_type, item in zip(item_types, value, strict=True)
+            ]
+        return value
+
     candidates = _candidate_models(annotation)
     if len(candidates) != 1:  # unknown/ambiguous shape: leave it for Pydantic to judge
         return value
-    model = candidates[0]
-    if isinstance(value, Mapping):
-        return _strip_unknown_members(model, value)
-    if isinstance(value, list):
-        return [
-            _strip_unknown_members(model, item) if isinstance(item, Mapping) else item
-            for item in value
-        ]
-    return value
+    if not isinstance(value, Mapping):
+        return value
+    return _strip_unknown_members(candidates[0], value)
 
 
 def _strip_unknown_members(model: type[BaseModel], data: Mapping[str, Any]) -> dict[str, Any]:
@@ -244,11 +315,20 @@ def parse_json_document(
 ) -> ParsedScanDocument:
     """Parse a document produced by :func:`render_json` back into models.
 
+    The input is the **complete versioned document** — the report body plus the ``result``
+    member — as written by ``repolens scan --format json``. A bare ``ScanReport`` dump such as
+    ``report.model_dump_json()`` is *not* a complete document: it has no ``result`` member, has
+    no ``schema_version`` guarantee beyond the report field, and is rejected with
+    :class:`~repolens.exceptions.ScanDocumentError` rather than being silently completed.
+    Validate a report-only document with ``ScanReport.model_validate``.
+
     The ``schema_version`` is checked first, following the acceptance policy in
     :data:`repolens.models.SUPPORTED_SCHEMA_MAJOR_VERSIONS`: any minor/patch of a supported
     major version is accepted, and any other major version raises
     :class:`~repolens.exceptions.UnsupportedSchemaVersionError` instead of being decoded
-    under the wrong assumptions.
+    under the wrong assumptions. Version acceptance is about the *document* version: a
+    ``1.0.0``-shaped report without the later ``result`` member still fails the ``result``
+    requirement below.
 
     ``strict`` selects how additive changes are treated:
 
@@ -277,7 +357,12 @@ def parse_json_document(
     body: dict[str, Any] = {key: value for key, value in payload.items() if key != "result"}
     result_payload = payload.get("result")
     if result_payload is None:
-        raise ScanDocumentError("scan document is missing the 'result' member")
+        raise ScanDocumentError(
+            "scan document is missing the 'result' member: this parser reads the complete "
+            "versioned document emitted by render_json (or `repolens scan --format json`). "
+            "A bare ScanReport dump has no 'result'; validate that with "
+            "ScanReport.model_validate instead"
+        )
     if not isinstance(result_payload, Mapping):
         raise ScanDocumentError("scan document 'result' member must be a JSON object")
 

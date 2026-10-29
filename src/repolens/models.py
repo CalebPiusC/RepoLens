@@ -360,7 +360,12 @@ class ScanReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: str = Field(default=SCHEMA_VERSION, pattern=r"^\d+\.\d+\.\d+$")
+    # ``validate_default=True`` keeps the version contract honest: Pydantic does not validate
+    # field defaults by default, so without it a malformed ``SCHEMA_VERSION`` constant would be
+    # emitted verbatim instead of failing when the report is built.
+    schema_version: str = Field(
+        default=SCHEMA_VERSION, pattern=r"^\d+\.\d+\.\d+$", validate_default=True
+    )
     repolens_version: str = Field(min_length=1, max_length=32)
     repository_name: str = Field(min_length=1, max_length=256)
     scanned_at: datetime

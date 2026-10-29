@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
+from pydantic.fields import FieldInfo
 
 from repolens.exceptions import (
     ScanDocumentError,
@@ -22,6 +23,7 @@ from repolens.exceptions import (
     UnsupportedSchemaVersionError,
 )
 from repolens.json_output import (
+    _validate_forward_compatible,
     build_json_document,
     build_scan_result,
     parse_json_document,
@@ -167,6 +169,27 @@ def test_result_model_rejects_incomplete_or_negative_count_maps(
     """A consumer must be able to read every count key unconditionally."""
     with pytest.raises(ValidationError, match=message):
         _scan_result(**overrides)
+
+
+def test_malformed_default_schema_version_cannot_bypass_validation() -> None:
+    """L-2: Pydantic does not validate defaults, so the field opts in explicitly."""
+    field = ScanReport.model_fields["schema_version"]
+
+    assert field.validate_default is True
+    assert field.default == SCHEMA_VERSION
+
+    # A model built from this exact field, but with a malformed default, must refuse to build.
+    malformed = FieldInfo.merge_field_infos(field, FieldInfo(default="not-a-version"))
+    bad_report_model = create_model("BadSchemaReport", schema_version=(str, malformed))
+    with pytest.raises(ValidationError, match="schema_version"):
+        bad_report_model()
+
+    # Control: the same machinery with the shipped default still builds.
+    valid = FieldInfo.merge_field_infos(field, FieldInfo(default=SCHEMA_VERSION))
+    good_report_model: type[BaseModel] = create_model(
+        "GoodSchemaReport", schema_version=(str, valid)
+    )
+    assert good_report_model().model_dump()["schema_version"] == SCHEMA_VERSION
 
 
 def test_report_model_rejects_a_malformed_schema_version(
@@ -456,6 +479,42 @@ def test_incomplete_reasons_are_deduplicated_and_ordered(
 # --------------------------------------------------------------------------------------
 # Determinism and portable encoding
 # --------------------------------------------------------------------------------------
+
+
+def test_incomplete_reasons_follow_enum_declaration_order_not_alphabetical(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    """L-1: the documented order is the enum's declaration order, which is *not* alphabetical."""
+    report = make_scan_report(
+        outcomes=[
+            AnalyzerOutcome(analyzer_name="failed", status=AnalyzerStatus.FAILED),
+            AnalyzerOutcome(analyzer_name="slow", status=AnalyzerStatus.TIMED_OUT),
+            AnalyzerOutcome(
+                analyzer_name="capped", status=AnalyzerStatus.COMPLETED, coverage_truncated=True
+            ),
+            AnalyzerOutcome(
+                analyzer_name="aborted", status=AnalyzerStatus.UNAVAILABLE, coverage_incomplete=True
+            ),
+        ],
+        unreadable_directory_count=1,
+        truncated_by_file_limit=True,
+        skipped_by_depth_count=2,
+    )
+
+    result = build_scan_result(report, exit_code=3)
+    emitted = [reason.value for reason in result.incomplete_reasons]
+
+    assert emitted == [member.value for member in IncompleteReason]
+    assert emitted != sorted(emitted), "documentation must not imply alphabetical order"
+
+
+def test_readme_describes_the_real_incomplete_reason_order() -> None:
+    """L-1 regression: the README must not claim an alphabetical sort the code does not do."""
+    section = _json_section(_readme())
+
+    assert "Sorted, de-duplicated" not in section
+    assert "declaration order" in section
+    assert "not** alphabetical" in section
 
 
 def test_document_is_byte_identical_for_the_same_report(
@@ -828,6 +887,279 @@ def test_both_modes_accept_an_unmodified_document(
     assert parse_json_document(document) == parse_json_document(document, strict=False)
 
 
+class _MappedSubModel(BaseModel):
+    """Stand-in for a future MINOR field shape: a model nested inside a mapping."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    label: str = Field(min_length=1)
+    category: Category
+    child: _MappedSubModel | None = None
+
+
+class _MappedHolder(BaseModel):
+    """Container whose members are reachable only through a mapping or a sequence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    by_name: dict[str, _MappedSubModel]
+    entries: list[_MappedSubModel]
+
+
+_MappedSubModel.model_rebuild()
+
+
+def _mapped_holder_payload() -> dict[str, Any]:
+    return {
+        "by_name": {
+            "alpha": {"label": "Alpha", "category": "security", "future_member": 1},
+            "beta": {
+                "label": "Beta",
+                "category": "testing",
+                "child": {"label": "Gamma", "category": "structure", "future_member": 2},
+                "future_member": 3,
+            },
+        },
+        "entries": [{"label": "Delta", "category": "documentation", "future_member": 4}],
+        "future_member": True,
+    }
+
+
+def test_forward_compatible_projection_preserves_model_mapped_values() -> None:
+    """L-3: ``dict[str, SubModel]`` must keep its entries and lose only unknown members."""
+    parsed = _validate_forward_compatible(_MappedHolder, _mapped_holder_payload())
+
+    assert set(parsed.by_name) == {"alpha", "beta"}
+    assert parsed.by_name["alpha"].label == "Alpha"
+    assert parsed.by_name["beta"].child is not None
+    assert parsed.by_name["beta"].child.label == "Gamma"
+    assert [entry.label for entry in parsed.entries] == ["Delta"]
+    dumped = parsed.model_dump(mode="json")
+    assert "future_member" not in json.dumps(dumped)
+
+
+def test_forward_compatible_projection_still_refuses_unknown_values_in_a_mapping() -> None:
+    """L-3 must not weaken enum validation: a mapped model's unknown value still stops parsing."""
+    payload = _mapped_holder_payload()
+    payload["by_name"]["alpha"]["category"] = "unknown_future_category"
+
+    with pytest.raises(UnsupportedSchemaValueError, match=re.escape("by_name.alpha.category")):
+        _validate_forward_compatible(_MappedHolder, payload)
+
+
+def test_forward_compatible_projection_still_requires_mapped_members() -> None:
+    """L-3 must not weaken required-field validation inside a mapping."""
+    payload = _mapped_holder_payload()
+    del payload["by_name"]["beta"]["label"]
+
+    with pytest.raises(ValidationError, match=re.escape("by_name.beta.label")):
+        _validate_forward_compatible(_MappedHolder, payload)
+
+
+def test_forward_compatible_projection_leaves_non_mapping_values_alone() -> None:
+    """A wrongly shaped container is handed to Pydantic to reject, never silently repaired."""
+    payload = _mapped_holder_payload()
+    payload["by_name"] = ["not", "a", "mapping"]
+
+    with pytest.raises(ValidationError, match="by_name"):
+        _validate_forward_compatible(_MappedHolder, payload)
+
+
+def test_forward_compatible_projection_leaves_non_list_sequence_values_alone() -> None:
+    """A sequence annotation with a non-list value is not rewritten, only validated."""
+    payload = _mapped_holder_payload()
+    payload["entries"] = {"not": "a list"}
+
+    with pytest.raises(ValidationError, match="entries"):
+        _validate_forward_compatible(_MappedHolder, payload)
+
+
+def test_forward_compatible_projection_handles_fixed_length_tuples() -> None:
+    """A fixed-length tuple is projected position by position, so nested models keep working."""
+
+    class _PairHolder(BaseModel):
+        model_config = ConfigDict(extra="forbid", frozen=True)
+
+        pair: tuple[_MappedSubModel, int]
+
+    parsed = _validate_forward_compatible(
+        _PairHolder,
+        {"pair": [{"label": "Left", "category": "security", "future_member": 1}, 7]},
+    )
+
+    assert parsed.pair[0].label == "Left"
+    assert parsed.pair[0].category is Category.SECURITY
+    assert parsed.pair[1] == 7
+    assert "future_member" not in parsed.pair[0].model_dump(mode="json")
+
+    with pytest.raises(ValidationError, match="pair"):
+        _validate_forward_compatible(_PairHolder, {"pair": [{"label": "Left"}, 7, "extra"]})
+
+
+def test_forward_compatible_projection_handles_variadic_tuples() -> None:
+    """``tuple[Model, ...]`` is homogeneous, so every item is projected the same way."""
+
+    class _VariadicHolder(BaseModel):
+        model_config = ConfigDict(extra="forbid", frozen=True)
+
+        items: tuple[_MappedSubModel, ...]
+
+    parsed = _validate_forward_compatible(
+        _VariadicHolder,
+        {
+            "items": [
+                {"label": "One", "category": "security", "future_member": 1},
+                {"label": "Two", "category": "testing", "future_member": 2},
+            ]
+        },
+    )
+
+    assert [item.label for item in parsed.items] == ["One", "Two"]
+    assert "future_member" not in json.dumps(
+        [item.model_dump(mode="json") for item in parsed.items]
+    )
+
+
+class _OptionalContainerHolder(BaseModel):
+    """Container members wrapped in an optional union, the shape the L-3 gap was found in."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    by_name: dict[str, _MappedSubModel] | None = None
+    entries: list[_MappedSubModel] | None = None
+
+
+def test_forward_compatible_projection_preserves_optional_mapping_entries() -> None:
+    """L-3: ``dict[str, SubModel] | None`` keeps every entry and strips members inside each."""
+    payload = {
+        "by_name": {
+            "alpha": {"label": "Alpha", "category": "security", "future_member": 1},
+            "beta": {
+                "label": "Beta",
+                "category": "testing",
+                "child": {"label": "Gamma", "category": "structure", "future_member": 2},
+                "future_member": 3,
+            },
+        }
+    }
+
+    parsed = _validate_forward_compatible(_OptionalContainerHolder, payload)
+
+    assert parsed.by_name is not None
+    assert set(parsed.by_name) == {"alpha", "beta"}
+    assert parsed.by_name["alpha"].label == "Alpha"
+    assert parsed.by_name["beta"].child is not None
+    assert parsed.by_name["beta"].child.label == "Gamma"
+    assert "future_member" not in json.dumps(
+        {name: item.model_dump(mode="json") for name, item in parsed.by_name.items()}
+    )
+
+
+def test_forward_compatible_projection_preserves_optional_sequence_entries() -> None:
+    """L-3: ``list[SubModel] | None`` projects every item instead of passing it through."""
+    payload = {
+        "entries": [
+            {"label": "One", "category": "documentation", "future_member": 1},
+            {"label": "Two", "category": "code_quality", "future_member": 2},
+        ]
+    }
+
+    parsed = _validate_forward_compatible(_OptionalContainerHolder, payload)
+
+    assert parsed.entries is not None
+    assert [item.label for item in parsed.entries] == ["One", "Two"]
+    assert "future_member" not in json.dumps(
+        [item.model_dump(mode="json") for item in parsed.entries]
+    )
+
+
+@pytest.mark.parametrize("member", ["by_name", "entries"])
+def test_forward_compatible_projection_preserves_an_explicit_none_optional_container(
+    member: str,
+) -> None:
+    """``None`` stays ``None``; it must not be rewritten into an empty container."""
+    parsed = _validate_forward_compatible(_OptionalContainerHolder, {member: None})
+
+    assert getattr(parsed, member) is None
+
+
+def test_optional_mapping_projection_never_silently_drops_entries() -> None:
+    """Regression for the silent data loss: a mapping must survive optional unwrapping.
+
+    Before the fix the union bypassed the mapping branch, the mapping was mistaken for a
+    single model, and every entry was dropped while validation still succeeded — the worst
+    possible outcome for a forward-compatible reader. Assert both the entries and the absence
+    of a silent, empty success.
+    """
+    payload = {
+        "by_name": {
+            "first": {"label": "First", "category": "security", "future_member": 1},
+            "second": {"label": "Second", "category": "testing", "future_member": 2},
+        }
+    }
+
+    parsed = _validate_forward_compatible(_OptionalContainerHolder, payload)
+
+    assert parsed.by_name != {}, "an optional mapping must never be projected away to {}"
+    assert parsed.by_name is not None
+    assert len(parsed.by_name) == len(payload["by_name"])
+    assert sorted(parsed.by_name) == sorted(payload["by_name"])
+    # Stripping is still doing its job on the members that were kept.
+    assert all(not item.model_extra for item in parsed.by_name.values())
+
+
+def test_optional_container_projection_still_refuses_unknown_values() -> None:
+    """Unwrapping a union must not weaken enum validation inside the container."""
+    payload = {
+        "by_name": {"first": {"label": "First", "category": "unknown_future_category"}},
+    }
+
+    with pytest.raises(UnsupportedSchemaValueError, match=re.escape("by_name.first.category")):
+        _validate_forward_compatible(_OptionalContainerHolder, payload)
+
+
+def test_optional_container_projection_still_requires_required_members() -> None:
+    """Unwrapping a union must not weaken required-field validation inside the container."""
+    payload = {"entries": [{"label": "Missing category"}]}
+
+    with pytest.raises(ValidationError, match=re.escape("entries.0.category")):
+        _validate_forward_compatible(_OptionalContainerHolder, payload)
+
+
+def test_ambiguous_union_is_left_for_pydantic_instead_of_being_stripped() -> None:
+    """A union of several real members has no single shape: never strip, always fail loudly.
+
+    Stripping there meant a ``dict[str, Model] | int`` member was mistaken for a model and its
+    entries vanished — the same silent loss the optional-unwrapping fix removed.
+    """
+
+    class _AmbiguousHolder(BaseModel):
+        model_config = ConfigDict(extra="forbid", frozen=True)
+
+        either: dict[str, _MappedSubModel] | int
+
+    payload = {"either": {"k": {"label": "K", "category": "security", "future_member": 1}}}
+
+    with pytest.raises(ValidationError, match="either"):
+        _validate_forward_compatible(_AmbiguousHolder, payload)
+
+
+def test_non_optional_and_optional_model_annotations_are_unaffected() -> None:
+    """Guardrail: plain models, ``Model | None``, and scalars keep their documented behaviour."""
+    plain = _validate_forward_compatible(_MappedHolder, _mapped_holder_payload())
+    assert set(plain.by_name) == {"alpha", "beta"}
+
+    optional = _validate_forward_compatible(
+        _OptionalContainerHolder,
+        {"by_name": {"only": {"label": "Only", "category": "security", "future_member": 1}}},
+    )
+    assert optional.by_name is not None
+    assert list(optional.by_name) == ["only"]
+
+    # A scalar Optional is passed through untouched, including a real value.
+    assert _validate_forward_compatible(_OptionalContainerHolder, {}).by_name is None
+
+
 # --------------------------------------------------------------------------------------
 # D3: completeness documentation matches the implementation
 # --------------------------------------------------------------------------------------
@@ -929,6 +1261,64 @@ def test_readme_documents_the_strict_reader_limitation() -> None:
     assert "Extra inputs are not permitted" in section
     assert "expected, not damage" in section
     assert 'k != "result"' in section
+
+
+# --------------------------------------------------------------------------------------
+# M-1: a bare ScanReport dump is not a complete versioned document
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("version", ["1.0.0", SCHEMA_VERSION])
+def test_report_only_document_is_never_completed_into_a_scan_document(
+    make_scan_report: Callable[..., ScanReport], version: str
+) -> None:
+    """A genuine report-only document has no ``result`` and is refused in both modes."""
+    legacy = make_scan_report().model_copy(update={"schema_version": version})
+    bare = legacy.model_dump_json()
+    payload = json.loads(bare)
+
+    assert payload["schema_version"] == version
+    assert "result" not in payload
+
+    for strict in (True, False):
+        with pytest.raises(ScanDocumentError, match="missing the 'result' member") as captured:
+            parse_json_document(bare, strict=strict)
+        message = str(captured.value)
+        assert "ScanReport.model_validate" in message
+        assert "render_json" in message
+
+
+def test_report_only_document_is_readable_with_the_report_model(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    """The README's documented alternative must actually round-trip the bare dump."""
+    report = make_scan_report()
+    bare = report.model_dump_json()
+
+    assert ScanReport.model_validate(json.loads(bare)) == report
+
+
+def test_complete_document_from_the_older_minor_version_is_still_accepted(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    """Fixing the docs must not change the version gate for a *complete* 1.0.0 document."""
+    document = _document_with_version(make_scan_report(), "1.0.0")
+
+    parsed = parse_json_document(json.dumps(document), strict=True)
+
+    assert parsed.report.schema_version == "1.0.0"
+    assert parsed.result.status is ScanStatus.CLEAN
+
+
+def test_readme_distinguishes_report_only_documents_from_complete_documents() -> None:
+    """M-1 regression: the README must not imply a result-less document is accepted."""
+    section = _json_section(_readme())
+
+    assert "bare `ScanReport.model_dump_json()`" in section
+    assert "Accepted *as a version*" in section
+    assert "ScanReport.model_validate" in section
+    # The old wording, which read as "1.0.0 documents just work", must stay gone.
+    assert "Accepted. Additive MINOR changes are handled per the table above." not in section
 
 
 def test_public_exports_cover_the_parsing_contract() -> None:
