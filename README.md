@@ -126,7 +126,7 @@ lower severities, but every finding is counted in the summary above.
 | Option | Description |
 | --- | --- |
 | `PATH` | Directory to scan. Defaults to `.`. Missing paths, regular files, and symlinked roots are rejected before any analyzer runs. |
-| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity affect the exit code and the `Result` line. Every finding is still listed and counted in the summary, and the `total` line reports how many are below the threshold. Default: `info`. |
+| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity affect the exit code and the `Result` line. Below-threshold findings are counted in the summary (the `total` line reports how many are below) but are not shown as rows in the text table; `--format json` always contains every finding. Default: `info`. |
 | `--max-findings N` | Maximum number of findings printed in the terminal table, `1`-`10000`. Default: `50`. Truncated output is announced. It never truncates `--format json` output. |
 | `--format {text,json}` | Output format. `text` (default) prints the human-readable report; `json` prints exactly one machine-readable JSON document on stdout. The exit codes and every security guarantee are identical for both. See [Machine-readable JSON output](#machine-readable-json-output). |
 | `--network-checks` | Enable the optional OSV.dev known-vulnerability lookups (requires network). Disabled by default. |
@@ -552,12 +552,13 @@ bandit-python-security  unavailable   `bandit` executable was not found on PATH 
 
 ## Supported checks
 
-Every finding carries a stable rule ID, a location, deterministic provenance (`FindingSource`), evidence, explanation, recommendation, and a verification step. Rule IDs prefixed with a tool name preserve that tool's own rule code.
+Every finding carries a stable rule ID, a location, deterministic provenance (`FindingSource`), evidence, explanation, recommendation, and a verification step. Rule IDs prefixed with a tool name preserve that tool's own rule code. The complete per-rule catalog, including severity mappings for external tools, is in the [rules reference](docs/rules/README.md).
 
 | Rule ID | Category | Severity | Check |
 | --- | --- | --- | --- |
-| `RL-STRUCT-001` … `RL-STRUCT-011` | structure | info–high | LICENSE, README, `.gitignore` coverage, unignored secrets/vendor dirs, manifests, lockfiles, binary bloat (Stage 1) |
+| `RL-STRUCT-001` … `RL-STRUCT-011` | structure (`RL-STRUCT-002`: documentation) | low–high | LICENSE, README, `.gitignore` coverage, unignored vendor dirs, manifests, lockfiles, binary bloat, malformed root manifests |
 | `RL-STRUCT-012` | structure | low | `.gitignore` excludes lockfiles or test directories that should be committed |
+| `RL-SEC-001` | security | high (critical for private keys) | Sensitive file present and not covered by `.gitignore`; its contents are never read |
 | `RL-DEP-001` | dependencies | medium | Malformed dependency lockfile |
 | `RL-DEP-002` | dependencies | medium | Invalid PEP 508 requirement in a requirements file |
 | `RL-DEP-003` | dependencies | low | npm dependency declared but not present in the lockfile |
@@ -717,6 +718,23 @@ Two Windows environment capabilities are handled by skipping, never by weakening
 - Tests for the 64-level `<MAX_DIRECTORY_DEPTH>` limit nest single-character directories under a short scratch root, and skip if the filesystem still refuses. Windows enforces a ~260 character path limit unless long paths are enabled, which a deep tree below pytest's own temporary directory would exceed.
 
 Directory-permission tests are skipped on platforms that do not enforce `chmod` (Windows).
+
+## Documentation
+
+Additional project documentation lives in [`docs/`](docs/README.md). This README remains the
+authoritative reference for CLI behavior, exit codes, and the JSON schema contract; the documents
+below explain design and process without redefining that behavior.
+
+| Document | Description |
+| --- | --- |
+| [Architecture](docs/architecture/README.md) | Scan pipeline, module responsibilities, data flow, and security boundaries |
+| [Architecture Decision Records](docs/adr/README.md) | Why key design choices were made, including the versioned JSON document |
+| [Product Requirements](docs/prd/README.md) | Product scope, target users, and non-functional requirements |
+| [Contributing](docs/contributing/README.md) | Development setup, quality gates, and how to write an analyzer |
+| [Security model](docs/security/README.md) | Threat model, discovery and subprocess safety, and reporting guidance |
+| [Rules reference](docs/rules/README.md) | Every rule ID with category, severity, and trigger |
+| [Changelog](docs/changelog/README.md) | Unreleased changes for the upcoming `0.1.0` |
+| [Test suite](tests/README.md) | Test layout, stub tools, markers, and how to run subsets |
 
 ## License
 
