@@ -93,6 +93,7 @@ class OsvVulnerabilityAnalyzer(Analyzer):
         return self._coverage_partial
 
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
+        self._reset_reporting()
         self._message = None
         self._coverage_partial = False
         inventory = self._inventory(context)
@@ -120,6 +121,11 @@ class OsvVulnerabilityAnalyzer(Analyzer):
         except OsvError as exc:
             raise AnalyzerExecutionError(f"OSV.dev lookup failed: {exc}") from exc
 
+        if getattr(client, "advisories_truncated", False):
+            self._mark_reporting_failure(
+                f"OSV.dev returned more than {config.max_osv_advisories} distinct advisories; "
+                "some were not reported."
+            )
         findings = self._build_findings(vulnerabilities, inventory, config)
         queried = f"Queried OSV.dev for {len(packages)}"
         if self._coverage_partial:
@@ -148,6 +154,7 @@ class OsvVulnerabilityAnalyzer(Analyzer):
                 continue
             seen.add(coordinate)
             if len(findings) >= config.max_findings_per_analyzer:
+                self._mark_findings_truncated(config.max_findings_per_analyzer)
                 break
 
             source_path = location_index.get((vuln.package.name.lower(), vuln.package.version))

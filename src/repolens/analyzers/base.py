@@ -34,6 +34,9 @@ class AnalyzerExecutionError(RuntimeError):
 class Analyzer(ABC):
     """Minimal contract implemented by all built-in and external tool analyzers."""
 
+    # Immutable default also supports subclasses that do not call a base initializer.
+    _reporting_failures: tuple[str, ...] = ()
+
     @property
     @abstractmethod
     def name(self) -> str:
@@ -56,8 +59,37 @@ class Analyzer(ABC):
         return AnalyzerAvailability(available=True)
 
     def completion_message(self) -> str | None:
-        """Return optional telemetry to record when the analyzer completes successfully."""
+        """Return optional telemetry to record when the analyzer returns findings."""
         return None
+
+    def reporting_failure(self) -> str | None:
+        """Explain why the last run could not return a complete set of findings, if any.
+
+        The engine records a failed outcome but keeps the findings already returned. This
+        is distinct from partial eligible-file coverage and does not change its schema field.
+        """
+        return " ".join(self._reporting_failures) or None
+
+    def _reset_reporting(self) -> None:
+        """Clear per-run reporting state, including when an analyzer instance is reused."""
+        self._reporting_failures = ()
+
+    def _mark_reporting_failure(self, reason: str) -> None:
+        """Record a reporting failure once while keeping confirmed findings available."""
+        if reason not in self._reporting_failures:
+            self._reporting_failures += (reason,)
+
+    def _mark_findings_truncated(self, limit: int) -> None:
+        self._mark_reporting_failure(
+            f"Findings truncated to {limit}; additional findings were omitted."
+        )
+
+    def _limit_findings(self, findings: list[Finding], limit: int) -> list[Finding]:
+        """Enforce a finding cap and flag actual omissions, not equality at the limit."""
+        if len(findings) > limit:
+            self._mark_findings_truncated(limit)
+            return findings[:limit]
+        return findings
 
     def coverage_partial(self) -> bool:
         """Return True when the last run covered only part of the eligible repository files.

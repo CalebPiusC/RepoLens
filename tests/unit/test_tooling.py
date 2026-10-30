@@ -265,3 +265,19 @@ def test_probe_tool_returns_an_absolute_path_for_a_relative_path_entry(
     assert Path(availability.executable).is_file()
     # Anchoring must not lose the version probe, which also runs from a different directory.
     assert availability.version == "2.4.6"
+
+
+def test_run_tool_retains_independent_stderr_truncation(
+    install_fake_tool: Callable[..., Path],
+) -> None:
+    install_fake_tool(
+        "verbose-tool", "print('[]')\nsys.stderr.write('x' * 2048)\n", version="verbose-tool 1.0"
+    )
+    with tool_workspace() as workspace:
+        result = run_tool(
+            "verbose-tool", [], cwd=workspace, timeout_seconds=10.0, max_output_bytes=1024
+        )
+    assert result.stdout.strip() == "[]"
+    assert result.output_truncated is True
+    assert result.stdout_truncated is False
+    assert result.stderr_truncated is True

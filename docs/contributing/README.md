@@ -74,14 +74,18 @@ needed:
 | `skip_reason(context, config) -> str \| None` | Default `None`. Return text for a deliberate, exit-neutral skip (for example an opt-in that was not enabled). Takes precedence over unavailability for the recorded outcome. |
 | `check_availability() -> AnalyzerAvailability` | Default available. For external tools, return `analyzer_availability("<tool>")` from `analyzers/tooling.py` (outcome when unavailable: `unavailable`, exit-neutral). |
 | `analyze(context, config) -> list[Finding]` | Do the work and return findings. The engine builds the `AnalyzerOutcome`; you never return one. Raise `AnalyzerTimeoutError` / `AnalyzerUnavailableError` / `AnalyzerExecutionError` (from `analyzers/base.py`) for the corresponding failure modes — see `tooling.run_tool()`, which already maps subprocess failures for you. |
-| `completion_message() -> str \| None` | Optional detail recorded on a `completed` outcome. |
-| `coverage_partial() -> bool` | Return `True` when a cap meant only part of the eligible files were covered; the engine records `coverage_truncated` and the scan counts as incomplete. |
+| `completion_message() -> str \| None` | Optional detail recorded when the analyzer returns findings. |
+| `reporting_failure() -> str \| None` | Reason the returned findings are incomplete; the engine records `failed` but retains confirmed findings. |
+| `coverage_partial() -> bool` | Return `True` when a cap meant only part of the eligible files were covered; the engine records `coverage_truncated` on a completed outcome. |
 
 `context` is a `RepositoryContext` (`repolens.discovery`): use `context.files`,
 `context.files_by_path`, `context.has_file()`, and `context.read_text()` — never open repository
 paths directly, so symlink, sensitive-file, and size protections apply. Cap your output at
 `config.max_findings_per_analyzer` and honor the budgets in `ScanConfig` instead of hard-coding
-limits.
+limits. Reset per-run reporting state with `_reset_reporting()` at the start of `analyze()`, and
+use `_limit_findings()` to report actual omissions rather than treating an exact cap as loss.
+For other output loss, `_mark_reporting_failure()` records a reason while preserving findings.
+For unexamined eligible files, use `coverage_partial()`; do not broaden its JSON field meaning.
 
 A minimal, working example (flags a missing file; adapt names and rules):
 

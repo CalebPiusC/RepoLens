@@ -276,9 +276,11 @@ class OsvClient:
         )
         self._max_advisories = max_advisories
         self._total_timeout_seconds = total_timeout_seconds
+        self.advisories_truncated = False
 
     def query(self, packages: Sequence[OsvPackage]) -> list[OsvVulnerability]:
         """Return vulnerabilities affecting ``packages``, deduplicated by advisory ID."""
+        self.advisories_truncated = False
         if not packages:
             return []
 
@@ -327,6 +329,7 @@ class OsvClient:
 
         unique_ids = sorted({match.vuln_id for match in deduped.values()})
         allowed_ids = unique_ids[: self._max_advisories]
+        self.advisories_truncated = len(unique_ids) > len(allowed_ids)
 
         # Detail lookups are optional enrichment: they are bounded by an advisory cap and a
         # wall-clock budget so a slow service cannot stall the whole scan indefinitely.

@@ -16,6 +16,7 @@ from repolens.analyzers.tooling import (
     absolute_paths,
     analyzer_availability,
     iter_batches,
+    parse_diagnostic_stdout,
     repository_relative_path,
     run_tool,
     select_source_files_with_status,
@@ -148,6 +149,7 @@ class RuffAnalyzer(Analyzer):
         return self._coverage_partial
 
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
+        self._reset_reporting()
         self._message = None
         self._coverage_partial = False
         files, capped = select_source_files_with_status(
@@ -160,10 +162,14 @@ class RuffAnalyzer(Analyzer):
 
         tool_version_str = tool_version("ruff")
         findings: list[Finding] = []
+        empty_findings: list[Finding] = []
         truncated = False
+        processed_files = 0
+        skipped_files = 0
 
         with tool_workspace() as workspace:
             for batch in iter_batches(files, config.tool_batch_size):
+                processed_files += len(batch)
                 paths = absolute_paths(context.canonical_root, batch)
                 if not paths:
                     continue
@@ -191,24 +197,39 @@ class RuffAnalyzer(Analyzer):
                         f"{result.returncode}: {result.redacted_stderr() or '<no stderr>'}"
                     )
 
-                findings.extend(
-                    self._parse_diagnostics(result.stdout, context, workspace, tool_version_str)
+                batch_findings, output_failure = parse_diagnostic_stdout(
+                    "Ruff",
+                    result,
+                    lambda stdout: self._parse_diagnostics(
+                        stdout, context, workspace, tool_version_str
+                    ),
+                    fallback=empty_findings,
                 )
+                if output_failure:
+                    self._mark_reporting_failure(output_failure)
+                findings.extend(batch_findings)
+                truncated = len(findings) > config.max_findings_per_analyzer
+                findings = self._limit_findings(findings, config.max_findings_per_analyzer)
                 if len(findings) >= config.max_findings_per_analyzer:
-                    findings = findings[: config.max_findings_per_analyzer]
-                    truncated = True
+                    skipped_files = len(files) - processed_files
+                    self._coverage_partial |= skipped_files > 0
                     break
 
         parts: list[str] = []
         if capped:
             parts.append(
-                f"Ruff only analyzed {len(files)} Python file(s): the max_tool_files limit "
+                f"Ruff only analyzed {processed_files} Python file(s): the max_tool_files limit "
                 f"({config.max_tool_files}) was reached, so other files were not linted."
             )
         if truncated:
             parts.append(
                 f"Ruff findings truncated to {config.max_findings_per_analyzer}; "
-                f"{len(files)} file(s) considered."
+                f"{processed_files} file(s) analyzed."
+            )
+        if skipped_files:
+            parts.append(
+                f"Ruff reached the finding limit; {skipped_files} eligible file(s) "
+                "in later batches were not analyzed."
             )
         if not parts:
             parts.append(f"Ruff analyzed {len(files)} Python file(s).")
@@ -292,6 +313,7 @@ class BanditAnalyzer(Analyzer):
 
     def __init__(self) -> None:
         self._message: str | None = None
+        self._coverage_partial = False
 
     @property
     def name(self) -> str:
@@ -310,6 +332,7 @@ class BanditAnalyzer(Analyzer):
         return self._coverage_partial
 
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
+        self._reset_reporting()
         self._message = None
         self._coverage_partial = False
         files, capped = select_source_files_with_status(
@@ -322,10 +345,14 @@ class BanditAnalyzer(Analyzer):
 
         tool_version_str = tool_version("bandit")
         findings: list[Finding] = []
+        empty_findings: list[Finding] = []
         truncated = False
+        processed_files = 0
+        skipped_files = 0
 
         with tool_workspace() as workspace:
             for batch in iter_batches(files, config.tool_batch_size):
+                processed_files += len(batch)
                 paths = absolute_paths(context.canonical_root, batch)
                 if not paths:
                     continue
@@ -342,30 +369,45 @@ class BanditAnalyzer(Analyzer):
                         f"{result.returncode}: {result.redacted_stderr() or '<no stderr>'}"
                     )
 
-                findings.extend(
-                    self._parse_results(result.stdout, context, workspace, tool_version_str)
+                batch_findings, output_failure = parse_diagnostic_stdout(
+                    "Bandit",
+                    result,
+                    lambda stdout: self._parse_results(
+                        stdout, context, workspace, tool_version_str
+                    ),
+                    fallback=empty_findings,
                 )
+                if output_failure:
+                    self._mark_reporting_failure(output_failure)
+                findings.extend(batch_findings)
+                truncated = len(findings) > config.max_findings_per_analyzer
+                findings = self._limit_findings(findings, config.max_findings_per_analyzer)
                 if len(findings) >= config.max_findings_per_analyzer:
-                    findings = findings[: config.max_findings_per_analyzer]
-                    truncated = True
+                    skipped_files = len(files) - processed_files
+                    self._coverage_partial |= skipped_files > 0
                     break
 
         parts: list[str] = []
         if capped:
             parts.append(
-                f"Bandit only analyzed {len(files)} Python file(s): the max_tool_files limit "
+                f"Bandit only analyzed {processed_files} Python file(s): the max_tool_files limit "
                 f"({config.max_tool_files}) was reached, so other files were not scanned."
             )
-        config_note = untrusted_config_message(context, frozenset({".bandit", "bandit.yaml"}))
-        if config_note:
-            parts.append(config_note)
         if truncated:
             parts.append(
                 f"Bandit findings truncated to {config.max_findings_per_analyzer}; "
-                f"{len(files)} file(s) considered."
+                f"{processed_files} file(s) analyzed."
             )
-        else:
-            parts.append(f"Bandit analyzed {len(files)} Python file(s).")
+        if skipped_files:
+            parts.append(
+                f"Bandit reached the finding limit; {skipped_files} eligible file(s) "
+                "in later batches were not analyzed."
+            )
+        elif not truncated:
+            parts.append(f"Bandit analyzed {processed_files} Python file(s).")
+        config_note = untrusted_config_message(context, frozenset({".bandit", "bandit.yaml"}))
+        if config_note:
+            parts.append(config_note)
         self._message = " ".join(parts)
         return findings
 

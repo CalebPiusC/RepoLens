@@ -143,10 +143,15 @@ The exit code is the result: `0` clean, `1` findings at or above the threshold, 
 arguments or an unusable path (nothing was scanned), `3` the scan could not be completed, and
 `130` interrupted. Only `0` means "clean". See [Exit codes](#exit-codes) for the full policy.
 
-Two reporting limits are worth knowing before you trust a clean result:
+A few limits are worth knowing before you trust a clean result:
 
 - `--max-findings N` (default `50`) truncates only the terminal table and its `Details` blocks.
-  The `--format json` and `--format html` documents always contain every finding.
+  JSON and HTML contain every finding in the scan report.
+- Internal analyzer safety limits are separate from that presentation option. If a finding cap,
+  Biome's diagnostic limit, or truncated diagnostic stdout prevents a complete report, the scan
+  is incomplete and retains the findings already confirmed. A cap that leaves later eligible
+  files unexamined also makes the scan incomplete. See
+  [Partial scans](#partial-scans-and-false-clean-protection).
 - An optional analyzer whose tool is not installed is reported as `unavailable` and does not
   change the exit code, so a clean scan can still mean "Ruff and Bandit did not run". The
   analyzer section names them; [Optional external tools](#optional-external-tools) explains how
@@ -251,7 +256,7 @@ lower severities, but every finding is counted in the summary above.
 | Option | Description |
 | --- | --- |
 | `PATH` | Directory to scan. Defaults to `.`. Missing paths, regular files, and symlinked roots are rejected before any analyzer runs. |
-| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity affect the exit code and the `Result` line. Below-threshold findings are counted in the summary (the `total` line reports how many are below) but are not shown as rows in the text table; `--format json` and `--format html` always contain every finding. Default: `info`. |
+| `--min-severity {info,low,medium,high,critical}` | Only findings at or above this severity affect the exit code and the `Result` line. Below-threshold findings are counted in the summary (the `total` line reports how many are below) but are not shown as rows in the text table; JSON and HTML contain every finding in the scan report. Default: `info`. |
 | `--max-findings N` | Maximum number of findings printed in the terminal table and its `Details` blocks, `1`-`10000`. Default: `50`. Truncated output is announced. It never truncates `--format json` or `--format html` output. |
 | `--format {text,json,html}` | Output format. `text` (default) prints the human-readable report; `json` prints exactly one machine-readable JSON document on stdout; `html` prints a self-contained HTML report. The exit codes and every security guarantee are identical for all three. See [Machine-readable JSON output](#machine-readable-json-output) and [HTML report](#html-report). |
 | `--output PATH` | Write the HTML report to `PATH` instead of stdout. Requires `--format html` (anything else is a usage error, exit `2`). The file is written atomically, so a failed or interrupted write never truncates an existing report; a confirmation line goes to stderr, stdout stays empty, and a successful scan keeps its exit code. If the report cannot be written, the command exits `3`. |
@@ -282,8 +287,9 @@ Notes on the policy:
 - A scan is **incomplete** when any analyzer failed or timed out, when a directory or file
   entry could not be read (for example `EACCES`/permission denied), when discovery stopped at
   the file-count or total-byte limit, when a subtree was nested deeper than the supported
-  walk depth, or when an analyzer only covered part of the repository because its file limit
-  was reached. An incomplete scan never exits `0`.
+  walk depth, or when an analyzer left eligible files unexamined because of a file or finding
+  limit. Omitted findings or truncated diagnostic stdout also make the scan incomplete. An
+  incomplete scan never exits `0`.
 - An analyzer that was **never available** (an optional tool such as Ruff, Bandit, or Biome
   is not installed) and an analyzer that was **skipped** leave the exit code untouched, so CI
   is not broken by missing optional tooling. The analyzer section counts every status on
@@ -312,7 +318,8 @@ with exit `1`):
 | Entry could not be inspected (stat/resolve failed) | `Warning: could not read … N entries, …` | `3` (or `1` with findings) |
 | File-count or byte limit reached | `Warning: discovery stopped early after reaching the … limit` | `3` (or `1` with findings) |
 | Subtree deeper than `MAX_DIRECTORY_DEPTH` (64 levels) | `Warning: discovery skipped N directories nested deeper than the supported limit of 64 levels, …` | `3` (or `1` with findings) |
-| Analyzer hit `max_tool_files`, so it linted only some files | `Warning: N analyzer(s) covered only part of the repository because a file limit was reached …` | `3` (or `1` with findings) |
+| Analyzer hit `max_tool_files` or the finding cap before later file batches | `Warning: N analyzer(s) covered only part of the repository because a built-in limit was reached …` | `3` (or `1` with findings) |
+| Finding or advisory cap dropped results, Biome omitted diagnostics, or diagnostic stdout was truncated | Analyzer `failed` with confirmed findings retained and a message explaining the limit | `3` (or `1` with findings) |
 
 Deliberate policy skips are **disclosed but do not change the exit code**, because removing
 them would make ordinary repositories look broken:
@@ -564,13 +571,14 @@ report = ScanReport.model_validate(json.loads(text))
 Read `result.is_complete` (and `result.incomplete_reasons` for why) rather than interpreting
 analyzer statuses yourself: that single boolean is what the exit code is derived from.
 
-Five analyzer situations look similar in the analyzer table but differ in effect:
+These analyzer situations look similar in the analyzer table but differ in effect:
 
 | Situation | `analyzer_outcomes[]` | Scan incomplete? | Exit code |
 | --- | --- | --- | --- |
 | Optional tool never installed — the check never started | `status: "unavailable"`, `coverage_incomplete: false` | No | Unchanged |
 | Analyzer not applicable to this repository, or deliberately skipped | `status: "skipped"` | No | Unchanged |
-| Analyzer ran but covered only part of the files (a tool file cap was reached) | `status: "completed"`, `coverage_truncated: true` | Yes — `analyzer_coverage_truncated` | `3` (or `1` with findings) |
+| Analyzer ran but covered only part of the eligible files (a tool file or finding cap left later batches unexamined) | `status: "completed"`, `coverage_truncated: true` | Yes — `analyzer_coverage_truncated` | `3` (or `1` with findings) |
+| Findings were omitted or diagnostic stdout was truncated | `status: "failed"`, `coverage_truncated: false`; any confirmed findings are retained | Yes — `analyzer_failed` | `3` (or `1` with findings) |
 | Analyzer started and then failed or timed out | `status: "failed"` / `"timed_out"`, `coverage_incomplete: false` | Yes — `analyzer_failed` / `analyzer_timed_out` | `3` (or `1` with findings) |
 | Check started, then could not complete (for example a requested network lookup failed mid-flight) | `status: "unavailable"` **with** `coverage_incomplete: true` | Yes — `check_aborted` | `3` (or `1` with findings) |
 
@@ -581,13 +589,22 @@ its status and the matching `incomplete_reasons` entry, even though `coverage_in
 `false` for it. Consumers that only inspect `coverage_incomplete` will miss those scans, so key
 off `result.is_complete` (or `result.incomplete_reasons`) instead.
 
+Finding-limit equality alone is not an omission: if the final eligible batch produces exactly
+`max_findings_per_analyzer`, that alone does not make the report incomplete. If a reporting
+failure and unexamined files both occur, the failed outcome's message describes both;
+`coverage_truncated` remains reserved for a successfully completed analyzer with partial
+eligible-file coverage. Biome's
+`summary.diagnosticsNotPrinted` and truncated **stdout** trigger a reporting failure; truncated
+**stderr** alone does not. JSON schema `1.1.0` and its existing enum values are unchanged.
+
 ### Guarantees
 
 - **Nothing but the document on stdout.** No banner, progress text, ANSI color (even with
   `--color always`), or human-readable summary is mixed into the stream. Diagnostics stay on
   stderr.
-- **Complete findings.** `--max-findings` limits only the terminal table; the JSON document
-  always contains every finding.
+- **All report findings.** `--max-findings` limits only the terminal table; the JSON document
+  contains every finding in the scan report. Check `result.is_complete` for any omission caused
+  by analysis or reporting limits.
 - **Deterministic.** For the same repository content and options, the document is byte-identical
   except for `scanned_at` and the `duration_ms` values. Member order is fixed (report fields in
   model order, then `result`), findings keep the engine's deterministic sort (severity rank,
