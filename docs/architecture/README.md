@@ -157,7 +157,9 @@ Applicability and availability probing are themselves isolated: an exception the
    outcome `unavailable`. This never-started case does not make the scan incomplete.
 4. Otherwise `analyze(context, config)` returns `list[Finding]`; the engine records `completed`
    with `findings_count`, `duration_ms`, `completion_message()`, and `coverage_truncated` copied
-   from `coverage_partial()`.
+   from `coverage_partial()`. If `reporting_failure()` gives a reason, the engine instead records
+   `failed` while retaining returned findings; `coverage_truncated` remains reserved for a
+   completed run. With `fail_fast=True`, that reporting failure raises `AnalyzerExecutionError`.
 5. `AnalyzerTimeoutError` → `timed_out`; `AnalyzerUnavailableError` raised *after* the check
    started → `unavailable` with `coverage_incomplete=True` (an aborted check: the scan is
    incomplete); any other exception → `failed` (or re-raised if `fail_fast`).
@@ -306,7 +308,8 @@ Because JSON is serialized from the same models, redacted fields stay redacted i
 - `cwd` must be an existing, non-symlink directory; analyzers pass a disposable tool workspace
   outside the repository (see `tooling.tool_workspace()`), never the repository itself.
 - stdout and stderr are each capped separately at `subprocess_max_output_bytes` (5 MiB by
-  default); truncation is flagged on the result.
+  default). The result records each stream's truncation plus the existing aggregate flag;
+  truncated diagnostic stdout makes reporting incomplete, while stderr alone does not.
 - Timeouts terminate the whole tree: POSIX uses a new session and `killpg` (`SIGTERM`, then
   `SIGKILL`); Windows uses a new process group plus `taskkill /F /T /PID` with a `kill()`
   fallback, so a `cmd.exe` `.cmd`-shim wrapper cannot leave the real tool running.

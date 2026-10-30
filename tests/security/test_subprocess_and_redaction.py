@@ -147,3 +147,31 @@ def test_subprocess_runner_rejects_shell_strings_and_unsafe_cwd(
     make_symlink(link_dir, real_dir, target_is_directory=True)
     with pytest.raises(SubprocessExecutionError, match="working directory"):
         run_safe_command([sys.executable, "-c", "pass"], cwd=link_dir)
+
+
+@pytest.mark.parametrize(
+    ("stdout_size", "stderr_size", "stdout_cut", "stderr_cut"),
+    [
+        (1024, 1024, False, False),
+        (1025, 0, True, False),
+        (0, 1025, False, True),
+        (1025, 1025, True, True),
+    ],
+)
+def test_subprocess_reports_each_truncated_stream_independently(
+    tmp_path: Path, stdout_size: int, stderr_size: int, stdout_cut: bool, stderr_cut: bool
+) -> None:
+    code = (
+        "import sys; "
+        f"sys.stdout.buffer.write(b'x' * {stdout_size}); "
+        f"sys.stderr.buffer.write(b'y' * {stderr_size})"
+    )
+    result = run_safe_command(
+        [sys.executable, "-c", code], cwd=tmp_path, timeout_seconds=5.0, max_output_bytes=1024
+    )
+    assert result.returncode == 0
+    assert result.stdout_truncated is stdout_cut
+    assert result.stderr_truncated is stderr_cut
+    assert result.output_truncated is (stdout_cut or stderr_cut)
+    assert len(result.stdout.encode()) == min(stdout_size, 1024)
+    assert len(result.stderr.encode()) == min(stderr_size, 1024)

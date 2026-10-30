@@ -90,6 +90,7 @@ class DocumentationAnalyzer(Analyzer):
         return "documentation-consistency"
 
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
+        self._reset_reporting()
         findings: list[Finding] = []
         findings.extend(self._check_manifest_references(context))
         findings.extend(self._check_readme_links(context))
@@ -99,7 +100,7 @@ class DocumentationAnalyzer(Analyzer):
         deduped: dict[str, Finding] = {}
         for finding in findings:
             deduped.setdefault(finding.fingerprint, finding)
-        return list(deduped.values())[: config.max_findings_per_analyzer]
+        return self._limit_findings(list(deduped.values()), config.max_findings_per_analyzer)
 
     # -- manifest references --------------------------------------------------------
 
@@ -212,7 +213,13 @@ class DocumentationAnalyzer(Analyzer):
         evaluated = 0
         for number, line in enumerate(text.splitlines(), start=1):
             for match in _MARKDOWN_LINK_RE.finditer(line):
-                if evaluated >= _MAX_LINKS_EVALUATED or len(findings) >= _MAX_LINK_FINDINGS:
+                if len(findings) >= _MAX_LINK_FINDINGS:
+                    self._mark_reporting_failure(
+                        f"README broken-link findings reached the {_MAX_LINK_FINDINGS}-finding "
+                        "limit; remaining links were not checked."
+                    )
+                    return findings
+                if evaluated >= _MAX_LINKS_EVALUATED:
                     return findings
                 evaluated += 1
                 target = match.group(1).strip()

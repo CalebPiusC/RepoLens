@@ -182,3 +182,21 @@ def test_engine_records_partial_coverage_from_analyzers(
     assert outcome.status == AnalyzerStatus.COMPLETED
     assert outcome.coverage_truncated is True
     assert outcome.message == "Only analyzed part of the repository."
+
+
+def test_engine_isolates_a_broken_reporting_failure_hook_and_retains_findings(
+    make_python_repo: Callable[..., Path],
+) -> None:
+    class _BrokenReportingAnalyzer(_DuplicateAndUnsortedAnalyzer):
+        def reporting_failure(self) -> str | None:
+            leaked = "sk-ant-" + "y" * 32
+            raise RuntimeError(f"completeness check failed with token {leaked}")
+
+    report = ScanEngine(analyzers=[_BrokenReportingAnalyzer()]).scan(make_python_repo())
+    outcome = report.analyzer_outcomes[0]
+    assert outcome.status is AnalyzerStatus.FAILED
+    assert outcome.findings_count == 3
+    assert "Could not determine reporting completeness" in (outcome.message or "")
+    assert "sk-ant-" not in (outcome.message or "")
+    assert "REDACTED" in (outcome.message or "")
+    assert [finding.rule_id for finding in report.findings] == ["DUP-CRIT", "DUP-LOW"]

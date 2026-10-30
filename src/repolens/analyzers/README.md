@@ -26,10 +26,13 @@ class Analyzer(ABC):
         """Default available. Unavailable -> outcome 'unavailable'."""
 
     def completion_message(self) -> str | None:
-        """Optional detail recorded on a 'completed' outcome."""
+        """Optional detail recorded when an analyzer returns findings."""
+
+    def reporting_failure(self) -> str | None:
+        """Why the returned findings are incomplete, or None."""
 
     def coverage_partial(self) -> bool:
-        """True if a cap limited coverage; engine sets coverage_truncated."""
+        """True if a cap limited eligible-file coverage; engine sets coverage_truncated."""
 
     @abstractmethod
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
@@ -42,6 +45,11 @@ could not complete) → `unavailable` with `coverage_incomplete=True`; `Analyzer
 unexpected exceptions → `failed`. With `fail_fast=False` (default) one analyzer's failure never
 aborts the others. Probing (`is_applicable`/`skip_reason`/`check_availability`) is isolated the
 same way, and ordering matters: applicability first, then `skip_reason`, then availability.
+When `reporting_failure()` is set, the engine records `failed` and retains returned findings;
+with `fail_fast=True` it raises `AnalyzerExecutionError` instead. Built-ins reset per-run state
+with `_reset_reporting()`, use `_limit_findings()` for actual omissions, and mark other reporting
+failures explicitly. A cap that leaves later files unexamined uses `coverage_partial()` instead;
+if both occur, the failed outcome's message retains the coverage detail.
 
 ## Default analyzers (in `default_analyzers()` order)
 

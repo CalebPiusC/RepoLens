@@ -25,9 +25,11 @@ would drift from the report models. There were also no stability rules for the s
   `cli.determine_exit_code()`. The caller's exit code is passed in, never recomputed, so document
   and process status cannot disagree. Implementation: `repolens.json_output`
   (`render_json`, `build_json_document`, `build_scan_result`) using only the standard library.
-- JSON always contains **every** finding. `--max-findings` remains a text-table presentation
-  limit; `--min-severity` affects only the verdict fields (`result.has_findings`, `status`,
-  counts at/above threshold), not document completeness.
+- JSON contains **every finding in the scan report**. `--max-findings` remains a
+  text-table presentation limit; `--min-severity` affects only the verdict fields
+  (`result.has_findings`, `status`, counts at/above threshold), not document completeness.
+  Internal analyzer limits can omit findings; such reporting failures make the result incomplete
+  while preserving confirmed findings.
 - `SCHEMA_VERSION = "1.1.0"` (in `models.py`, shape-validated with `validate_default=True`)
   versions the *document shape*, independently of `repolens_version`. The `1.0.0` → `1.1.0` bump
   is MINOR because it is purely additive (the `result` member plus documented ordering/encoding
