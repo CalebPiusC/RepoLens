@@ -126,6 +126,7 @@ class TestingAnalyzer(Analyzer):
         return self._message
 
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
+        self._reset_reporting()
         self._message = None
         candidates = self._candidate_files(context)
         if not candidates:
@@ -197,7 +198,7 @@ class TestingAnalyzer(Analyzer):
             f"Found {len(python_tests)} Python and {len(jsts_tests)} JavaScript/TypeScript "
             "test file(s)."
         )
-        return findings[: config.max_findings_per_analyzer]
+        return self._limit_findings(findings, config.max_findings_per_analyzer)
 
     def _candidate_files(self, context: RepositoryContext) -> list[DiscoveredFile]:
         selected: list[DiscoveredFile] = []

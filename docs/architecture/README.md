@@ -2,236 +2,319 @@
 
 ## Overview
 
-RepoLens is a static repository health checker that operates entirely without executing or installing anything from the target repository. It accepts a filesystem path, discovers every relevant file within configurable resource limits, runs a sequence of independent analyzers against the discovered content, and returns a structured report of findings. The design emphasises three properties above all others: **safety** (no code from the target repository is ever trusted or executed), **determinism** (findings are reproducible and fingerprinted), and **fault isolation** (a failure in any single analyzer never aborts the rest of the scan).
+RepoLens is a static repository health checker for Python and JavaScript/TypeScript projects. It
+accepts a filesystem path, discovers files within configurable resource limits, runs a sequence of
+independent analyzers against the discovered content, and returns a structured `ScanReport`. It
+never executes or installs anything from the target repository.
 
----
+Three properties drive the design:
 
-## Scan Pipeline
+- **Safety** — no code, configuration, or path from the target repository is trusted. See the
+  [security model](../security/README.md).
+- **Deterministic findings** — for the same repository content and options, findings, their order,
+  and their fingerprints are reproducible. Reports as a whole are not byte-identical across runs
+  because `scanned_at` and `duration_ms` values vary.
+- **Fault isolation** — with the default `ScanConfig(fail_fast=False)`, a failure in one analyzer
+  is recorded as that analyzer's outcome and the remaining analyzers still run. Discovery failures
+  that prevent a safe walk (for example an entry escaping the canonical root) abort the scan
+  before any analyzer runs.
 
-The following diagram shows the complete execution path from CLI invocation to final report output.
+For CLI behavior, exit codes, and the JSON contract this document summarizes, the
+[root README](../../README.md) is authoritative.
+
+## Scan pipeline
 
 ```mermaid
 flowchart TD
-    A["CLI (cli.py)\nargparse, exit codes"] --> B["ScanEngine (engine.py)\norchestrates scan"]
-    B --> C["discover_repository()\ndiscovery.py"]
-    C --> D["DiscoverySummary\nfile list, byte counts, languages"]
-    D --> B
-    B --> E["Analyzer 1\nstructure.py"]
-    B --> F["Analyzer 2\npython_lint.py"]
-    B --> G["Analyzer 3\njsts_lint.py"]
-    B --> H["Analyzer 4\ndependencies.py"]
-    B --> I["Analyzer 5\ndocumentation.py"]
-    B --> J["Analyzer 6\ntesting.py"]
-    B --> K["Analyzer 7\nadvisories.py"]
-    E & F & G & H & I & J & K --> L["findings: list[Finding]"]
-    L --> M["ScanReport (models.py)\nimmutable, schema-versioned"]
-    M --> N["Reporting (reporting.py)\nterminal render, verdict"]
-    N --> O["Exit code\n0 / 1 / 2 / 3 / 130"]
+    A["CLI: repolens scan PATH\n(cli.py, argparse)"] --> B["ScanEngine\n(engine.py)"]
+    B --> C["discover_repository()\n(discovery.py)"]
+    C --> D["RepositoryContext\n(files, languages, root .gitignore)"]
+    D --> E["Analyzers, in default order"]
+    E --> F1["repolens-structure"]
+    E --> F2["dependency-manifests"]
+    E --> F3["documentation-consistency"]
+    E --> F4["testing-hygiene"]
+    E --> F5["ruff-python-lint"]
+    E --> F6["bandit-python-security"]
+    E --> F7["biome-jsts-lint"]
+    E --> F8["osv-dependency-check\n(opt-in, network)"]
+    F1 & F2 & F3 & F4 & F5 & F6 & F7 & F8 --> G["Deduplicate by fingerprint\nand sort findings"]
+    G --> H["ScanReport\n(models.py, frozen)"]
+    H --> I["--format text (default)\nreporting.render_report()"]
+    H --> J["--format json\njson_output.render_json()"]
+    I --> K["stdout + exit code"]
+    J --> K
 ```
 
-Each analyzer box runs inside a try/except block inside `ScanEngine`. An exception in any box records a `failed` outcome for that analyzer and continues to the next.
+Both renderers derive their verdict from `reporting.evaluate()`; the CLI's
+`determine_exit_code()` uses the same verdict, so text output, JSON `result`, and the process
+exit code cannot disagree.
 
----
-
-## Module Relationships
+## Module relationships
 
 ```mermaid
 classDiagram
     class ScanEngine {
         +config: ScanConfig
-        +analyzers: list[Analyzer]
-        +scan(path) ScanReport
+        +analyzers: tuple
+        +scan(repo_path) ScanReport
     }
     class ScanConfig {
         +max_files: int
         +max_file_size_bytes: int
         +max_total_bytes: int
-        +subprocess_timeout_seconds: int
+        +subprocess_timeout_seconds: float
         +enable_network_checks: bool
-        +excluded_dirs: set[str]
+        +excluded_dirs: frozenset
     }
-    class BaseAnalyzer {
+    class Analyzer {
         <<abstract>>
-        +is_applicable(summary) bool
-        +check_availability() bool
-        +skip_reason() str
-        +analyze(path, files, config) AnalyzerOutcome
+        +name: str
+        +is_applicable(context) bool
+        +skip_reason(context, config) str
+        +check_availability() AnalyzerAvailability
+        +analyze(context, config) list
         +coverage_partial() bool
         +completion_message() str
     }
     class ScanReport {
         +schema_version: str
         +repolens_version: str
-        +findings: list[Finding]
-        +analyzer_outcomes: dict
+        +findings: list
+        +analyzer_outcomes: list
         +discovery: DiscoverySummary
+        +ai_advisories: list
     }
     class Finding {
         +rule_id: str
-        +category: str
-        +severity: str
-        +confidence: str
-        +location: str
+        +category: Category
+        +severity: Severity
+        +confidence: Confidence
+        +title: str
+        +location: FindingLocation
         +evidence: str
+        +explanation: str
+        +recommendation: str
+        +verification: str
+        +source: FindingSource
         +fingerprint: str
     }
     class DiscoverySummary {
-        +total_files: int
-        +total_bytes: int
-        +detected_languages: list[str]
-        +truncated: bool
-        +incomplete: bool
+        +total_files_scanned: int
+        +total_bytes_scanned: int
+        +skipped_symlink_count: int
+        +sensitive_files_detected: int
+        +truncated_by_file_limit: bool
+        +truncated_by_byte_limit: bool
+        +unreadable_directory_count: int
+        +unreadable_entry_count: int
+        +skipped_by_depth_count: int
+        +detected_languages: list
     }
-    class Reporter {
-        +options: RenderOptions
-        +evaluate(report) str
-        +render_report(report) str
-    }
-    class SubprocessRunner {
-        +run(cmd, cwd, env) CompletedProcess
-    }
-    class Redaction {
-        +scrub(text) str
+    class ScanResult {
+        +exit_code: int
+        +min_severity: Severity
+        +status: ScanStatus
+        +is_complete: bool
+        +incomplete_reasons: list
     }
 
     ScanEngine --> ScanConfig : configured by
-    ScanEngine --> BaseAnalyzer : runs each
+    ScanEngine --> Analyzer : runs each
     ScanEngine --> ScanReport : produces
     ScanReport --> Finding : contains
     ScanReport --> DiscoverySummary : contains
-    BaseAnalyzer --> SubprocessRunner : uses
-    BaseAnalyzer --> Redaction : uses
-    Reporter --> ScanReport : renders
+    ScanReport --> ScanResult : derived for JSON
 ```
 
----
+`ScanResult` is not stored in `ScanReport`. `json_output.build_scan_result()` derives it at
+render time and `render_json()` emits it as the document's final `result` member.
 
-## Module Overview
+## Module overview
 
-### `engine.py` — ScanEngine
+### `engine.py` — `ScanEngine`
 
-`ScanEngine` is the central orchestrator. It accepts a `ScanConfig` and a list of `Analyzer` instances at construction time. When `scan(path)` is called it:
+`ScanEngine(config=None, analyzers=None)` defaults to `ScanConfig()` and
+`default_analyzers()` from `analyzers/__init__.py`. `scan(repo_path)`:
 
-1. Calls `discover_repository(path, config)` to produce a `DiscoverySummary` and the list of discovered file paths.
-2. Iterates through each analyzer. For each: checks `is_applicable()`, checks `check_availability()`, then calls `analyze()`.
-3. Collects all `Finding` objects and `AnalyzerOutcome` records.
-4. Assembles and returns an immutable `ScanReport`.
+1. Calls `discover_repository(target, config)`, which returns a `RepositoryContext`.
+2. Runs each analyzer through the lifecycle below, collecting `Finding` objects and one
+   `AnalyzerOutcome` per analyzer.
+3. Deduplicates findings by fingerprint and sorts them by severity rank, category, path, line,
+   rule ID, and fingerprint.
+4. Returns a frozen `ScanReport`. `analyzer_outcomes` is a list in analyzer order.
 
-All analyzer calls are wrapped in fault-isolation blocks. A raised exception records the analyzer as `failed` without interrupting the remaining analyzers.
+### Analyzer lifecycle (per analyzer)
 
----
+Applicability and availability probing are themselves isolated: an exception there records a
+`failed` outcome (or propagates if `fail_fast` is set) and the scan continues.
 
-### `discovery.py` — Repository Discovery
+1. `is_applicable(context)` is `False` → outcome `skipped` ("Analyzer not applicable…").
+2. `skip_reason(context, config)` returns text (for example OSV checks not opted into) → outcome
+   `skipped` with that message. (All three probes run when applicable; a skip reason takes
+   precedence over unavailability for the recorded outcome.)
+3. `check_availability()` reports unavailable (for example an optional tool is not on `PATH`) →
+   outcome `unavailable`. This never-started case does not make the scan incomplete.
+4. Otherwise `analyze(context, config)` returns `list[Finding]`; the engine records `completed`
+   with `findings_count`, `duration_ms`, `completion_message()`, and `coverage_truncated` copied
+   from `coverage_partial()`. If `reporting_failure()` gives a reason, the engine instead records
+   `failed` while retaining returned findings; `coverage_truncated` remains reserved for a
+   completed run. With `fail_fast=True`, that reporting failure raises `AnalyzerExecutionError`.
+5. `AnalyzerTimeoutError` → `timed_out`; `AnalyzerUnavailableError` raised *after* the check
+   started → `unavailable` with `coverage_incomplete=True` (an aborted check: the scan is
+   incomplete); any other exception → `failed` (or re-raised if `fail_fast`).
 
-Discovery performs a safe iterative depth-first walk of the target directory. Key guarantees:
+The eight built-in analyzers, in default order, are listed in the
+[analyzers package notes](../../src/repolens/analyzers/README.md). The base class is `Analyzer`
+in `analyzers/base.py`; only `name` (a read-only property) and `analyze()` are abstract — the
+other methods have safe defaults.
 
-- Symlinks are never followed. Any symlink encountered is recorded and excluded.
-- All file reads are opened with `O_NOFOLLOW` to prevent time-of-check/time-of-use (TOCTOU) race conditions.
-- Sensitive filenames (`.env`, SSH private keys, PEM files, credential stores) are detected and excluded from content reads; their presence is recorded in the summary.
-- Per-file size is capped at `max_file_size_bytes` (1 MiB by default). Total bytes across all files is capped at `max_total_bytes` (50 MiB).
-- Directory traversal depth is capped at 64 levels.
-- `.gitignore` rules are evaluated to respect project-defined exclusions.
-- Directories listed in `excluded_dirs` (`node_modules`, `.venv`, `dist`, `.git`, etc.) are never entered.
-- Any directory or entry that cannot be read is recorded as a scan-incomplete condition; the report is never marked clean when content was inaccessible.
+### `discovery.py` — safe repository discovery
 
----
+An iterative depth-first walk (`os.scandir`, entries sorted by name) that returns a
+`RepositoryContext`: the canonical root, the sorted tuple of `DiscoveredFile` records, the root
+`.gitignore` matcher, skipped-symlink paths (kept on the context; the serialized
+`DiscoverySummary` carries only the count), present artifact directories, and the summary itself.
 
-### `models.py` — Data Models
+Guarantees and limits:
 
-All data models are Pydantic v2 models with full validation.
+- Symlinks are never followed: symlinked entries are skipped and counted, and a symlinked
+  repository root is rejected unless `ScanConfig(reject_symlink_root=False)` is set
+  programmatically. Skipped symlinks alone do not make a scan incomplete.
+- File *contents* are read only through `RepositoryContext.read_text()`, which refuses paths
+  outside discovery, sensitive files, and oversized files, re-checks for symlinks and root
+  escape, and opens with `O_NOFOLLOW` **where the platform provides it** (POSIX). On platforms
+  without `O_NOFOLLOW` (notably Windows) the symlink and canonical-root checks still apply, but
+  the kernel-level TOCTOU guarantee does not. External tools open the files they are given
+  themselves; they receive only paths that already passed discovery.
+- Sensitive filenames (`.env*` except safe templates such as `.env.example`, SSH private keys,
+  `.pem`/`.key`/keystore files, credential files) are recorded and counted but their contents are
+  never read.
+- Only the **root** `.gitignore` is loaded and evaluated. Directories in `excluded_dirs`
+  (`.git`, `node_modules`, `.venv`, `dist`, and similar) are never entered.
+- Caps: 10,000 files, 1 MiB per file, 50 MiB total counted bytes, and a 64-level walk depth.
+  Hitting a file/byte cap or the depth limit, or failing to read directories/entries, is recorded
+  in the summary and makes the scan *incomplete* — it can never exit `0`.
 
-**`Finding`**: The unit of output from all deterministic analyzers. Each field is described below.
+### `models.py` — Pydantic v2 data models
 
-| Field | Type | Notes |
-|---|---|---|
-| `rule_id` | `str` | Stable identifier such as `RL-STRUCT-001` or `RUFF-E501`. |
-| `category` | `str` | One of: `structure`, `security`, `dependencies`, `documentation`, `testing`, `code_quality`. |
-| `severity` | `str` | One of: `critical`, `high`, `medium`, `low`, `info`. |
-| `confidence` | `str` | Analyzer-assigned confidence level. |
-| `location` | `str` | File path and optional line number. |
-| `evidence` | `str` | Auto-redacted before storage. |
-| `explanation` | `str` | Human-readable description. |
-| `recommendation` | `str` | Actionable remediation step. |
-| `source` | `str` | Always `deterministic` for `Finding`. |
-| `fingerprint` | `str` | SHA-256 hash auto-generated from stable fields. |
+All models are frozen (`frozen=True`, `extra="forbid"`). The serialized shape is versioned by
+`SCHEMA_VERSION` (currently `1.1.0`), independently of the package version (`repolens_version`).
 
-**`AIAdvisory`**: Structurally separate from `Finding`. Intended for future opt-in Gemini-powered explanations. Never mixed into the deterministic findings list.
+- **`Finding`** — one deterministic result: `rule_id`, `category`, `severity`, `confidence`,
+  `title`, optional `location` (`FindingLocation`: repository-relative POSIX `path`, optional
+  lines/column), optional `evidence` (redacted by a field validator), `explanation`,
+  `recommendation`, `verification`, `source` (`FindingSource`: `kind`, `tool`, optional
+  `tool_version`/`rule_url`), and `fingerprint` (auto-generated; see the
+  [rules reference](../rules/README.md#finding-fingerprints)). `source.kind` must be
+  `deterministic`.
+- **`AIAdvisory`** — structurally separate, non-authoritative suggestions for the future opt-in
+  Stage 4 feature; `source.kind` must be `ai_advisory`. Never merged into `findings`.
+- **`AnalyzerOutcome`** — `analyzer_name`, `status` (`completed`, `skipped`, `unavailable`,
+  `timed_out`, `failed`), `findings_count`, `duration_ms`, redacted optional `message`, and the
+  `coverage_truncated` / `coverage_incomplete` flags described above.
+- **`DiscoverySummary`** — counts and truncation/unreadable/depth flags from the walk, plus
+  `detected_languages`. Derived properties (`has_discovery_failures`, `depth_limited`,
+  `is_partial`) are not serialized fields.
+- **`ScanReport`** — `schema_version`, `repolens_version`, `repository_name`, `scanned_at` (UTC),
+  `duration_ms`, `discovery`, `analyzer_outcomes` (list), `findings` (list), `ai_advisories`
+  (list).
+- **`ScanResult`** — the derived JSON verdict (`exit_code`, `min_severity`, `status`,
+  `has_findings`, `is_complete`, `incomplete_reasons`, totals, and complete zero-inclusive count
+  maps). Emitted only by the JSON renderer.
 
-**`AnalyzerOutcome`**: Records the result of each analyzer run. Status values: `completed`, `skipped`, `unavailable`, `timed_out`, `failed`. Also records `duration_ms` and flags for truncated or incomplete coverage.
+`ScanConfig` (in `config.py`) is likewise a frozen Pydantic model holding every limit and toggle.
 
-**`ScanReport`**: The top-level output model. Fields include `schema_version`, `repolens_version`, `repository_name`, `scanned_at`, `duration_ms`, the `DiscoverySummary`, a dict of `AnalyzerOutcome` records keyed by analyzer name, the list of `Finding` objects, and an optional list of `AIAdvisory` objects.
+### `analyzers/` and `analyzers/tooling.py`
 
----
+Analyzer modules and their rule prefixes are catalogued in the
+[analyzers package notes](../../src/repolens/analyzers/README.md) and the
+[rules reference](../rules/README.md). External-tool analyzers (Ruff, Bandit, Biome) share
+`tooling.py`: availability probing on a sanitized `PATH` (running only the tool's `--version`),
+selection of eligible discovered files (not sensitive, not oversized, not ignored by the root
+`.gitignore`, capped by `max_tool_files`, batched by `tool_batch_size`), disposable tool
+workspaces outside the repository, mapping tool-reported paths back inside the root (outside
+paths are dropped), and translation of execution failures into the analyzer exception types.
 
-### `analyzers/` — Analyzer Modules
+### `dependencies.py` — manifest and lockfile parsing
 
-Each analyzer extends `BaseAnalyzer` (defined in `analyzers/base.py`). The engine calls the following interface in order:
+Shared, defensive parsing of Python and npm manifests/lockfiles into a dependency inventory used
+by both the dependency analyzer and the OSV analyzer. Supported formats and their limitations
+(for example best-effort `pnpm-lock.yaml`, unparsed `bun.lock*`, `setup.py` never executed or
+audited) are listed in the README's "Dependency analysis details". Untrusted JSON/TOML/INI is
+parsed defensively, including pathological nesting.
 
-1. `is_applicable(summary)`: Returns `False` if the analyzer has nothing to work on (for example, the JS/TS linter returns `False` for Python-only repos).
-2. `check_availability()`: Returns `False` if a required external tool is not installed.
-3. `analyze(path, files, config)`: Performs the analysis and returns an `AnalyzerOutcome` alongside any findings.
+### `osv.py` — OSV.dev client
 
-The analyzers are:
+HTTPS-only client for `api.osv.dev` (`/v1/querybatch`, then `/v1/vulns/<id>` for details), with
+redirects rejected, per-request and total timeouts, a response-size ceiling, batches of at most
+100 coordinates, and package/advisory caps from `ScanConfig`. Only `name`, `version`, and
+`ecosystem` are transmitted. Used only when network checks are opted into.
 
-| Module | Rule Prefix | Description |
-|---|---|---|
-| `structure.py` | `RL-STRUCT` | Repository structure and hygiene checks. |
-| `python_lint.py` | `RUFF-`, `BANDIT-` | Runs Ruff and Bandit against Python files. |
-| `jsts_lint.py` | `BIOME-` | Runs Biome against JavaScript and TypeScript files. |
-| `dependencies.py` | `RL-DEP` | Parses manifests and lockfiles for dependency issues. |
-| `documentation.py` | `RL-DOC` | Cross-references README, LICENSE, and manifest metadata. |
-| `testing.py` | `RL-TEST` | Checks for test presence, runner config, and coverage setup. |
-| `advisories.py` | `OSV-` | Queries OSV.dev for known vulnerabilities (opt-in). |
+### `cli.py` — command-line interface
 
----
+A thin `argparse` front end over `ScanEngine`: `repolens scan [PATH]` with `--min-severity`,
+`--max-findings` (text table only), `--format {text,json}`, `--color {auto,always,never}`, and
+`--network-checks`; `--version` exists only at the top level, `--help` at both levels. Running `repolens` with no command
+prints help and exits `2`. Exit codes are `0` clean, `1` findings at/above threshold (taking
+precedence over incompleteness), `2` nothing scanned, `3` incomplete/operational failure, `130`
+interrupted — identical for both formats, including when `--format json` writes no document
+because no report was produced (diagnostics go to stderr, stdout stays empty).
 
-### `cli.py` — Command-Line Interface
+### `reporting.py` and `json_output.py` — output formats
 
-A thin `argparse` wrapper. The single command is `repolens scan [PATH]`. When `PATH` is omitted, the current working directory is used. Options include `--min-severity`, `--max-findings`, `--color`, `--network-checks`, and `--version`. Exit codes are:
+These are function modules; there is no reporter class.
 
-| Code | Meaning |
-|---|---|
-| 0 | Scan completed with no findings at or above `--min-severity`. |
-| 1 | Scan completed and findings were produced. |
-| 2 | Usage error (bad arguments). |
-| 3 | Operational error or incomplete scan. |
-| 130 | Interrupted by the user (SIGINT). |
+- `reporting.evaluate(report, min_severity)` returns a `ScanVerdict`: findings at/above the
+  threshold, complete severity counts, and every incompleteness signal (failed/timed-out
+  analyzers, partial-coverage analyzers, aborted checks, discovery failures/truncation/depth).
+- `reporting.render_report(report, options, target_path, exit_code)` renders the terminal report.
+  Only findings at/above `RenderOptions.min_severity` appear as table rows (capped by
+  `max_findings`); the summary always counts every finding.
+- `json_output.render_json(report, exit_code, min_severity)` emits one ASCII-only JSON document:
+  `ScanReport.model_dump(mode="json")` plus the derived `result` member. JSON always contains
+  **every** finding (`--max-findings` does not apply) and is never colorized.
+  `json_output.parse_json_document()` reads a complete document back into models, enforcing the
+  schema-version acceptance policy (`SUPPORTED_SCHEMA_MAJOR_VERSIONS`) and, with
+  `strict=False`, ignoring unknown *members* while still refusing unknown *values*
+  (`UnsupportedSchemaValueError`). The full contract is in the README's
+  "Machine-readable JSON output" section; see also
+  [ADR-006](../adr/ADR-006-versioned-json-output.md).
 
----
+### `redaction.py` — secret redaction
 
-### `reporting.py` — Terminal Reporter
+`redact_secrets(text, max_length=500)` scrubs, in order: PEM private-key blocks/headers;
+known-prefix tokens (GitHub, AWS access key IDs, Google/Gemini, Anthropic/OpenAI/Stripe keys,
+Slack, PyPI/npm tokens, JWTs); credential-bearing URLs; `Authorization` header values; and
+generic quoted/unquoted secret assignments (with safe placeholders such as `changeme` left
+intact). It then truncates to `max_length`. Redaction runs at model entry for `Finding.evidence`
+and `AnalyzerOutcome.message`, and explicitly for CLI error text and subprocess stderr
+(`SubprocessResult.redacted_stderr()`). It is a defense-in-depth scrub of those fields, not a
+guarantee that arbitrary free text elsewhere is secret-free — which is why sensitive files are
+never read in the first place. `contains_secret()` exposes the same patterns as a predicate.
+Because JSON is serialized from the same models, redacted fields stay redacted in JSON.
 
-`Reporter` accepts a `RenderOptions` struct (`color`, `min_severity`, `max_findings`). `evaluate()` derives the exit verdict from the report. `render_report()` produces the formatted terminal string. Findings are filtered by `min_severity` and capped at `max_findings` before rendering.
+### `subprocess_runner.py` — hardened subprocess execution
 
----
+`run_safe_command()` is the single execution path for external tools:
 
-### `redaction.py` — Secret Redaction
+- `subprocess.Popen(..., shell=False)` with a validated argument list (a shell string is
+  rejected outright); the executable is resolved on the sanitized `PATH`.
+- Environment is an allowlist only (`PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `HOME`, `TMPDIR`,
+  `TEMP`, `TMP`, `SYSTEMROOT`, `PATHEXT`) plus forced safe values (`CI=1`, `NO_COLOR=1`,
+  `TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `PIP_DISABLE_PIP_VERSION_CHECK=1`,
+  `PYTHONDONTWRITEBYTECODE=1`, `NODE_NO_WARNINGS=1`). Callers may add explicit variables via
+  `extra_env`, which is validated.
+- `cwd` must be an existing, non-symlink directory; analyzers pass a disposable tool workspace
+  outside the repository (see `tooling.tool_workspace()`), never the repository itself.
+- stdout and stderr are each capped separately at `subprocess_max_output_bytes` (5 MiB by
+  default). The result records each stream's truncation plus the existing aggregate flag;
+  truncated diagnostic stdout makes reporting incomplete, while stderr alone does not.
+- Timeouts terminate the whole tree: POSIX uses a new session and `killpg` (`SIGTERM`, then
+  `SIGKILL`); Windows uses a new process group plus `taskkill /F /T /PID` with a `kill()`
+  fallback, so a `cmd.exe` `.cmd`-shim wrapper cannot leave the real tool running.
 
-Before any evidence string or error message is stored in a `Finding` or logged, it is passed through the redaction module. The redaction module applies regular expression patterns to detect and replace:
-
-- API keys and bearer tokens
-- Private key PEM blocks
-- JSON Web Tokens
-- Credential-bearing URLs (e.g., `https://user:password@host/`)
-- Common environment variable assignment patterns for secrets
-
-Redaction is applied at the point of data entry into models, not at render time, ensuring that sensitive content never appears in any serialised form of the report.
-
----
-
-### `subprocess_runner.py` — Subprocess Execution
-
-All external tool invocations (Ruff, Bandit, Biome) go through `SubprocessRunner`. Guarantees:
-
-- `shell=False` on every call. Command arguments are passed as a list, never interpolated into a shell string.
-- The child process receives only an allowlisted set of environment variables. `PATH` is included; arbitrary inherited environment variables are not.
-- Output is capped at `subprocess_max_output_bytes` (5 MiB). Output beyond the cap is discarded.
-- On POSIX systems (Linux, macOS), the child is started in a new process group and the entire group is killed on timeout. On Windows, a Job Object achieves equivalent group termination.
-- The timeout is `subprocess_timeout_seconds` (30 s by default).
-
----
-
-## Data Flow
+## Data flow
 
 ```mermaid
 flowchart LR
@@ -240,18 +323,17 @@ flowchart LR
         B["ScanConfig"]
     end
     subgraph Discovery
-        C["DFS walk\nO_NOFOLLOW\nsymlink rejection\nbyte caps"]
-        D["DiscoverySummary\n+ file list"]
+        C["DFS walk\nsymlink rejection\nbyte and depth caps"]
+        D["RepositoryContext"]
     end
     subgraph Analysis
         E["Analyzers\n(sequential, fault-isolated)"]
-        F["SubprocessRunner\n(shell=False, env allowlist)"]
+        F["run_safe_command()\n(shell=False, env allowlist)"]
         G["OSV.dev API\n(opt-in, HTTPS only)"]
     end
     subgraph Output
-        H["Redaction"]
-        I["ScanReport\n(immutable)"]
-        J["Terminal render\n+ exit code"]
+        H["ScanReport\n(redaction at model entry)"]
+        I["Text or JSON render\n+ exit code"]
     end
 
     A --> C
@@ -262,47 +344,60 @@ flowchart LR
     E --> G
     E --> H
     H --> I
-    I --> J
 ```
 
----
+## Security boundaries
 
-## Security Boundaries
+Summarized here; the [security model](../security/README.md) is the detailed reference.
 
-RepoLens applies a strict boundary between itself and the repository it scans. Nothing from the target repository is executed. The boundaries are:
+- **Filesystem:** discovery never executes, imports, or evaluates target files and never follows
+  symlinks; contents are read only via `read_text()` with the checks and platform-scoped
+  `O_NOFOLLOW` behavior described above. Repository tool configuration is not loaded (Ruff runs
+  `--isolated`; Bandit and Biome run from a disposable workspace, Biome with a RepoLens-generated
+  config passed via `--config-path`).
+- **Process:** tools run with structured arguments, a sanitized environment, a disposable working
+  directory outside the repository, and time/output limits with whole-tree timeout termination.
+- **Network:** disabled by default. With `--network-checks`, only HTTPS to `api.osv.dev` (no
+  redirects), transmitting only package coordinates.
+- **Output:** evidence and outcome/error messages are redacted before storage, so both the
+  terminal report and the JSON document are built from already-redacted models.
 
-**Filesystem boundary**: Discovery reads files but never `exec`s them, never imports them as Python modules, never evaluates them, and never dereferences symlinks. File reads are performed with `O_NOFOLLOW`.
+## Resource limits (defaults in `ScanConfig`)
 
-**Process boundary**: When external linting tools are invoked, they are given the target files as arguments but run inside a disposable working directory with a sanitised environment. They cannot reach back into the RepoLens process.
+| Limit | Field | Default |
+| --- | --- | --- |
+| Maximum files discovered | `max_files` | 10,000 |
+| Maximum size per file | `max_file_size_bytes` | 1 MiB |
+| Maximum total counted bytes | `max_total_bytes` | 50 MiB |
+| Maximum walk depth | `MAX_DIRECTORY_DEPTH` (discovery constant) | 64 |
+| Evidence truncation (model validators) | *(fixed in `models.py`)* | 500 chars |
+| Subprocess timeout | `subprocess_timeout_seconds` | 30 s |
+| Subprocess output cap (per stream) | `subprocess_max_output_bytes` | 5 MiB |
+| Files per external tool | `max_tool_files` | 2,000 |
+| Tool batch size | `tool_batch_size` | 200 |
+| Findings per analyzer | `max_findings_per_analyzer` | 200 |
+| Network timeout (per request) | `network_timeout_seconds` | 10 s |
+| Network response cap | `max_network_response_bytes` | 2 MiB |
+| OSV packages queried | `max_osv_packages` | 300 |
+| OSV advisories fetched | `max_osv_advisories` | 50 |
 
-**Network boundary**: Network access is disabled by default. When `--network-checks` is enabled, only HTTPS requests to `api.osv.dev` are permitted. HTTP redirects are rejected. Request payloads contain only package name, version, and ecosystem: no file content and no repository metadata.
+The CLI always uses these defaults (plus `--network-checks`); other values require the
+programmatic API. Two `ScanConfig` fields are currently defined but **not read** anywhere —
+`enable_external_tools` (tool participation is governed by applicability, availability, and
+`skip_reason()`) and `max_evidence_chars` (evidence truncation is fixed at 500 chars by the model
+validators). They are documented here so nobody mistakes setting them for behavior changes;
+wiring them up or removing them is a code decision for a future change, noted in the audit
+report rather than silently altered by documentation.
 
-**Output boundary**: All findings pass through the redaction layer before they are stored. Sensitive content cannot leak from the analysis phase into the report.
+## Extension points
 
----
-
-## Resource Limits
-
-| Limit | Default |
-|---|---|
-| Maximum files discovered | 10,000 |
-| Maximum size per file | 1 MiB |
-| Maximum total bytes read | 50 MiB |
-| Maximum directory depth | 64 |
-| Subprocess timeout | 30 s |
-| Subprocess max output | 5 MiB |
-| Maximum tool-visible files | 2,000 |
-
-All limits are defined in `ScanConfig` and can be adjusted when constructing `ScanEngine` programmatically.
-
----
-
-## Extension Points
-
-**Adding an analyzer**: Subclass `BaseAnalyzer`, implement the required interface, and pass an instance to `ScanEngine`. No registration mechanism is needed; the engine accepts any list of analyzers.
-
-**Custom config**: Construct `ScanConfig` with non-default values before passing it to `ScanEngine`. All limits and toggles are exposed as typed Pydantic fields.
-
-**Programmatic use**: `ScanEngine`, `ScanConfig`, and all models are importable from `repolens`. The CLI is a thin consumer of the same API that any Python script can use.
-
-**AI advisories (Stage 4)**: The `AIAdvisory` model and the separation between deterministic findings and advisory explanations are already in place. The Gemini integration layer will populate `AIAdvisory` objects without altering the `Finding` list or fingerprints.
+- **New analyzer:** subclass `Analyzer`, implement `name` and `analyze()`, choose a stable rule
+  prefix, add tests, and register the instance in `default_analyzers()`
+  (`analyzers/__init__.py`) for the default suite. `ScanEngine(analyzers=[...])` also accepts any
+  explicit sequence for embedding. Step-by-step: [contributing guide](../contributing/README.md).
+- **Custom limits/toggles:** construct `ScanConfig` and pass it to `ScanEngine`.
+- **Programmatic use:** `ScanEngine`, `ScanConfig`, the report models, schema-version constants,
+  and scan-document exceptions are exported from `repolens`; renderers live in
+  `repolens.reporting` and `repolens.json_output`.
+- **AI advisories (Stage 4, planned):** `AIAdvisory` and the deterministic/advisory separation
+  already exist in the schema; no AI integration is implemented yet.

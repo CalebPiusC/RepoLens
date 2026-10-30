@@ -6,8 +6,21 @@ from collections.abc import Callable
 
 import pytest
 
-from repolens.models import AnalyzerOutcome, AnalyzerStatus, Finding, ScanReport, Severity
-from repolens.reporting import RenderOptions, evaluate, format_bytes, render_report
+from repolens.models import (
+    AnalyzerOutcome,
+    AnalyzerStatus,
+    Finding,
+    IncompleteReason,
+    ScanReport,
+    Severity,
+)
+from repolens.reporting import (
+    RenderOptions,
+    evaluate,
+    format_bytes,
+    incomplete_reasons,
+    render_report,
+)
 
 
 def test_clean_report_renders_no_findings_message(
@@ -699,3 +712,207 @@ def test_aborted_check_alone_makes_the_scan_incomplete(
 
     assert evaluate(report).is_incomplete is True
     assert evaluate(report).is_clean is False
+
+
+# --------------------------------------------------------------------------------------
+# Coverage line
+# --------------------------------------------------------------------------------------
+
+
+def test_complete_scan_states_coverage_explicitly(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    output = render_report(make_scan_report(), exit_code=0)
+
+    assert "Coverage: complete" in output
+    assert "Coverage: incomplete" not in output
+
+
+def test_incomplete_scan_names_every_reason_on_the_coverage_line(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    report = make_scan_report(
+        unreadable_directory_count=1,
+        outcomes=[AnalyzerOutcome(analyzer_name="slow-analyzer", status=AnalyzerStatus.TIMED_OUT)],
+    )
+
+    output = render_report(report, exit_code=3)
+
+    assert "Coverage: incomplete — analyzer_timed_out, discovery_unreadable" in output
+
+
+def test_coverage_line_appears_once_before_the_findings(
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    output = render_report(make_scan_report(findings=[make_finding()]), exit_code=1)
+
+    assert output.count("Coverage: ") == 1
+    assert output.index("Coverage: ") < output.index("Findings")
+
+
+def test_incomplete_reasons_helper_is_the_shared_source_of_truth(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    clean = evaluate(make_scan_report())
+    broken = evaluate(
+        make_scan_report(
+            truncated_by_byte_limit=True,
+            unreadable_directory_count=2,
+            outcomes=[
+                AnalyzerOutcome(analyzer_name="a", status=AnalyzerStatus.FAILED),
+                AnalyzerOutcome(analyzer_name="b", status=AnalyzerStatus.FAILED),
+            ],
+        )
+    )
+
+    assert incomplete_reasons(clean) == ()
+    # De-duplicated, and ordered by enum declaration rather than by analyzer order.
+    assert incomplete_reasons(broken) == (
+        IncompleteReason.ANALYZER_FAILED,
+        IncompleteReason.DISCOVERY_UNREADABLE,
+        IncompleteReason.DISCOVERY_TRUNCATED,
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Detail blocks
+# --------------------------------------------------------------------------------------
+
+
+def test_findings_have_actionable_detail_blocks(
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    finding = make_finding(
+        rule_id="RL-TEST-003",
+        path="tests/test_app.py",
+        start_line=1,
+        title="Python tests exist but no test runner is configured",
+        explanation="Tests without a declared runner are easy to skip in CI.",
+        recommendation="Add [tool.pytest.ini_options] to pyproject.toml.",
+    )
+
+    output = render_report(make_scan_report(findings=[finding]), exit_code=1)
+
+    assert "Details" in output
+    assert "MEDIUM · RL-TEST-003 · tests/test_app.py:1" in output
+    assert "Python tests exist but no test runner is configured" in output
+    assert "Why: Tests without a declared runner are easy to skip in CI." in output
+    assert "Fix: Add [tool.pytest.ini_options] to pyproject.toml." in output
+
+
+def test_detail_blocks_are_absent_when_there_is_nothing_to_explain(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    output = render_report(make_scan_report(), exit_code=0)
+
+    assert "Details" not in output
+
+
+def test_detail_text_is_wrapped_and_indented(
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    finding = make_finding(explanation="word " * 200, recommendation="fix " * 200)
+
+    output = render_report(make_scan_report(findings=[finding]))
+
+    why_lines = [line for line in output.splitlines() if line.startswith("    Why:")]
+    assert len(why_lines) == 1
+    assert any(line.startswith("         ") for line in output.splitlines())
+    for line in output.splitlines():
+        assert len(line) < 220
+
+
+def test_detail_blocks_cover_only_the_findings_that_were_shown(
+    make_scan_report: Callable[..., ScanReport],
+    make_finding: Callable[..., Finding],
+) -> None:
+    findings = [make_finding(rule_id=f"RL-TEST-{index:03d}") for index in range(5)]
+
+    output = render_report(
+        make_scan_report(findings=findings),
+        options=RenderOptions(max_findings=2),
+    )
+
+    assert "RL-TEST-000 ·" in output
+    assert "RL-TEST-001 ·" in output
+    assert "RL-TEST-002 ·" not in output
+    assert "3 more finding(s) not shown" in output
+
+
+# --------------------------------------------------------------------------------------
+# Analyzer summary
+# --------------------------------------------------------------------------------------
+
+
+def test_analyzer_summary_counts_every_status_on_one_line(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    outcomes = [
+        AnalyzerOutcome(analyzer_name="repolens-structure", status=AnalyzerStatus.COMPLETED),
+        AnalyzerOutcome(analyzer_name="ruff-python-lint", status=AnalyzerStatus.COMPLETED),
+        AnalyzerOutcome(analyzer_name="biome-jsts-lint", status=AnalyzerStatus.SKIPPED),
+        AnalyzerOutcome(analyzer_name="bandit-python-security", status=AnalyzerStatus.UNAVAILABLE),
+    ]
+
+    output = render_report(make_scan_report(outcomes=outcomes))
+
+    assert "Analyzers — 2 completed · 1 skipped · 1 unavailable" in output
+
+
+def test_completed_analyzers_do_not_get_a_row_of_their_own(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    outcomes = [
+        AnalyzerOutcome(analyzer_name="repolens-structure", status=AnalyzerStatus.COMPLETED),
+        AnalyzerOutcome(
+            analyzer_name="ruff-python-lint",
+            status=AnalyzerStatus.UNAVAILABLE,
+            message="`ruff` executable was not found on PATH.",
+        ),
+    ]
+
+    output = render_report(make_scan_report(outcomes=outcomes))
+
+    analyzer_block = output.split("Analyzers — ", 1)[1].split("\n\n", 1)[0]
+    assert "repolens-structure" not in analyzer_block
+    assert "ruff-python-lint" in analyzer_block
+    assert "STATUS" in analyzer_block
+
+
+def test_partially_covered_analyzer_is_expanded_with_an_explanation(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    outcomes = [
+        AnalyzerOutcome(
+            analyzer_name="osv-dependency-check",
+            status=AnalyzerStatus.COMPLETED,
+            coverage_truncated=True,
+        )
+    ]
+
+    output = render_report(make_scan_report(outcomes=outcomes), exit_code=3)
+
+    assert "Analyzers — 1 completed" in output
+    assert "covered only part of the repository" in output
+
+
+def test_analyzer_messages_are_clipped_to_keep_the_table_readable(
+    make_scan_report: Callable[..., ScanReport],
+) -> None:
+    outcomes = [
+        AnalyzerOutcome(
+            analyzer_name="chatty-analyzer",
+            status=AnalyzerStatus.FAILED,
+            message="boom " * 200,
+        )
+    ]
+
+    output = render_report(make_scan_report(outcomes=outcomes), exit_code=3)
+
+    for line in output.splitlines():
+        assert len(line) < 220
+    assert "..." in output
+    assert "boom boom" in output

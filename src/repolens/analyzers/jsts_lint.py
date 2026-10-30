@@ -18,6 +18,7 @@ from repolens.analyzers.tooling import (
     absolute_paths,
     analyzer_availability,
     iter_batches,
+    parse_diagnostic_stdout,
     repository_relative_path,
     run_tool,
     select_config_files,
@@ -120,6 +121,7 @@ class BiomeAnalyzer(Analyzer):
         return self._coverage_partial
 
     def analyze(self, context: RepositoryContext, config: ScanConfig) -> list[Finding]:
+        self._reset_reporting()
         self._message = None
         self._coverage_partial = False
         files, capped = select_source_files_with_status(
@@ -132,13 +134,17 @@ class BiomeAnalyzer(Analyzer):
 
         tool_version_str = tool_version("biome")
         findings: list[Finding] = []
+        empty_result: tuple[list[Finding], str | None] = ([], None)
         truncated = False
+        processed_files = 0
+        skipped_files = 0
 
         with tool_workspace() as workspace:
             config_path = workspace / "repolens-biome.json"
             config_path.write_text(json.dumps(_BIOME_CONFIG), encoding="utf-8")
 
             for batch in iter_batches(files, config.tool_batch_size):
+                processed_files += len(batch)
                 paths = absolute_paths(context.canonical_root, batch)
                 if not paths:
                     continue
@@ -162,32 +168,50 @@ class BiomeAnalyzer(Analyzer):
                         f"{result.returncode}: {result.redacted_stderr() or '<no stderr>'}"
                     )
 
-                findings.extend(
-                    self._parse_diagnostics(result.stdout, context, workspace, tool_version_str)
+                parsed, output_failure = parse_diagnostic_stdout(
+                    "Biome",
+                    result,
+                    lambda stdout: self._parse_diagnostics(
+                        stdout, context, workspace, tool_version_str
+                    ),
+                    fallback=empty_result,
                 )
+                batch_findings, summary_failure = parsed
+                if output_failure:
+                    self._mark_reporting_failure(output_failure)
+                if summary_failure:
+                    self._mark_reporting_failure(summary_failure)
+                findings.extend(batch_findings)
+                truncated = len(findings) > config.max_findings_per_analyzer
+                findings = self._limit_findings(findings, config.max_findings_per_analyzer)
                 if len(findings) >= config.max_findings_per_analyzer:
-                    findings = findings[: config.max_findings_per_analyzer]
-                    truncated = True
+                    skipped_files = len(files) - processed_files
+                    self._coverage_partial |= skipped_files > 0
                     break
 
         parts: list[str] = []
         if capped:
             parts.append(
-                f"Biome only analyzed {len(files)} file(s): the max_tool_files limit "
+                f"Biome only analyzed {processed_files} file(s): the max_tool_files limit "
                 f"({config.max_tool_files}) was reached, so other files were not linted."
             )
+        if truncated:
+            parts.append(
+                f"Biome findings truncated to {config.max_findings_per_analyzer}; "
+                f"{processed_files} file(s) analyzed."
+            )
+        if skipped_files:
+            parts.append(
+                f"Biome reached the finding limit; {skipped_files} eligible file(s) "
+                "in later batches were not analyzed."
+            )
+        elif not truncated:
+            parts.append(f"Biome analyzed {processed_files} JavaScript/TypeScript file(s).")
         config_note = untrusted_config_message(context, _BIOME_CONFIG_NAMES)
         if config_note:
             parts.append(config_note)
         elif select_config_files(context, _BIOME_CONFIG_NAMES):
             parts.append("Project Biome configuration detected but not loaded.")
-        if truncated:
-            parts.append(
-                f"Biome findings truncated to {config.max_findings_per_analyzer}; "
-                f"{len(files)} file(s) considered."
-            )
-        else:
-            parts.append(f"Biome analyzed {len(files)} JavaScript/TypeScript file(s).")
         self._message = " ".join(parts)
         return findings
 
@@ -197,11 +221,19 @@ class BiomeAnalyzer(Analyzer):
         context: RepositoryContext,
         cwd: Path,
         tool_version_str: str | None,
-    ) -> list[Finding]:
+    ) -> tuple[list[Finding], str | None]:
         if not stdout.strip():
-            return []
+            return [], None
 
         payload = self._load_json(stdout)
+        summary = _as_mapping(payload.get("summary"))
+        summary_failure: str | None = None
+        if "diagnosticsNotPrinted" in summary:
+            not_printed = summary["diagnosticsNotPrinted"]
+            if not isinstance(not_printed, int) or isinstance(not_printed, bool) or not_printed < 0:
+                summary_failure = "Biome returned an invalid diagnosticsNotPrinted count."
+            elif not_printed > 0:
+                summary_failure = "Biome did not print all diagnostics (diagnosticsNotPrinted > 0)."
         diagnostics = payload.get("diagnostics", [])
         if not isinstance(diagnostics, list):
             raise AnalyzerExecutionError("Biome JSON output did not contain a diagnostics list.")
@@ -266,7 +298,7 @@ class BiomeAnalyzer(Analyzer):
                     ),
                 )
             )
-        return findings
+        return findings, summary_failure
 
     @staticmethod
     def _load_json(stdout: str) -> dict[str, Any]:

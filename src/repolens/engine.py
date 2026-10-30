@@ -10,6 +10,7 @@ from pathlib import Path
 from repolens import __version__
 from repolens.analyzers import (
     Analyzer,
+    AnalyzerExecutionError,
     AnalyzerTimeoutError,
     AnalyzerUnavailableError,
     default_analyzers,
@@ -17,6 +18,7 @@ from repolens.analyzers import (
 from repolens.config import ScanConfig
 from repolens.discovery import discover_repository
 from repolens.models import AnalyzerOutcome, AnalyzerStatus, Finding, ScanReport
+from repolens.redaction import redact_secrets
 
 
 def _finding_sort_key(finding: Finding) -> tuple[int, str, str, int, str, str]:
@@ -162,15 +164,37 @@ class ScanEngine:
                 )
             else:
                 analyzer_duration = (time.perf_counter() - analyzer_start) * 1000.0
+                try:
+                    reporting_failure = analyzer.reporting_failure()
+                except Exception as exc:
+                    if self.config.fail_fast:
+                        raise
+                    reporting_failure = (
+                        f"Could not determine reporting completeness: {type(exc).__name__}: {exc}"
+                    )
+                if reporting_failure and self.config.fail_fast:
+                    raise AnalyzerExecutionError(reporting_failure)
                 collected_findings.extend(analyzer_findings)
+                message = analyzer.completion_message()
+                if reporting_failure:
+                    message = redact_secrets(
+                        " ".join(part for part in (reporting_failure, message) if part),
+                        max_length=500,
+                    )
                 outcomes.append(
                     AnalyzerOutcome(
                         analyzer_name=analyzer.name,
-                        status=AnalyzerStatus.COMPLETED,
+                        status=(
+                            AnalyzerStatus.FAILED if reporting_failure else AnalyzerStatus.COMPLETED
+                        ),
                         findings_count=len(analyzer_findings),
                         duration_ms=analyzer_duration,
-                        message=analyzer.completion_message(),
-                        coverage_truncated=_coverage_partial(analyzer),
+                        message=message,
+                        # This flag describes successful, partial file coverage. A reporting
+                        # failure already makes the scan incomplete through its failed status.
+                        coverage_truncated=(
+                            _coverage_partial(analyzer) if not reporting_failure else False
+                        ),
                     )
                 )
 

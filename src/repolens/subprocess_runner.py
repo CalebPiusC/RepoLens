@@ -61,6 +61,13 @@ class SubprocessResult:
     duration_ms: float
     timed_out: bool = False
     output_truncated: bool = False
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+
+    def __post_init__(self) -> None:
+        # Keep the existing aggregate flag compatible with stream-specific flags.
+        if self.stdout_truncated or self.stderr_truncated:
+            object.__setattr__(self, "output_truncated", True)
 
     def redacted_stderr(self, *, max_length: int = 500) -> str:
         """Return ``stderr`` scrubbed of any secrets and length-bounded."""
@@ -265,4 +272,6 @@ def run_safe_command(
         duration_ms=duration_ms,
         timed_out=timed_out,
         output_truncated=stdout_truncated[0] or stderr_truncated[0],
+        stdout_truncated=stdout_truncated[0],
+        stderr_truncated=stderr_truncated[0],
     )

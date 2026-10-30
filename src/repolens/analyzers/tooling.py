@@ -15,11 +15,12 @@ import json
 import re
 import shutil
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
+from typing import TypeVar
 
 from repolens.analyzers.base import (
     AnalyzerAvailability,
@@ -34,6 +35,7 @@ from repolens.subprocess_runner import SubprocessResult, build_sanitized_env, ru
 _VERSION_PROBE_TIMEOUT_SECONDS = 5.0
 _VERSION_PROBE_MAX_OUTPUT_BYTES = 65_536
 _VERSION_PATTERN = re.compile(r"\b(\d+\.\d+(?:\.\d+)?)\b")
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +68,10 @@ def probe_tool(name: str, *, version_args: Sequence[str] = ("--version",)) -> To
             available=False,
             reason=f"`{name}` executable was not found on PATH (optional tool not installed).",
         )
+    # `shutil.which` returns a relative path when the matching `PATH` entry is relative (for
+    # example `PATH=.venv/bin:$PATH`). The tool is later executed from a different working
+    # directory, so the path is anchored to the current directory here, while it is still valid.
+    executable = str(Path(executable).resolve())
 
     version: str | None = None
     try:
@@ -250,6 +256,38 @@ def run_tool(
         )
 
     return result
+
+
+def parse_diagnostic_stdout(
+    tool_name: str,
+    result: SubprocessResult,
+    parser: Callable[[str], _T],
+    *,
+    fallback: _T,
+) -> tuple[_T, str | None]:
+    """Parse retained diagnostics and flag truncated stdout, independently of stderr.
+
+    A truncated prefix can still contain a complete JSON document. If it cannot be
+    parsed, keep prior batches rather than discarding already confirmed findings.
+    Malformed output without truncation remains an execution error.
+    """
+    # Older callers may construct a result with only the aggregate flag. Without a
+    # stream-specific stderr flag, conservatively treat that unknown loss as stdout loss.
+    stdout_truncated = result.stdout_truncated or (
+        result.output_truncated and not result.stderr_truncated
+    )
+    try:
+        parsed = parser(result.stdout)
+    except AnalyzerExecutionError:
+        if not stdout_truncated:
+            raise
+        parsed = fallback
+    reason = (
+        f"{tool_name} diagnostic stdout was truncated; some diagnostics may be missing."
+        if stdout_truncated
+        else None
+    )
+    return parsed, reason
 
 
 def analyzer_availability(tool_name: str) -> AnalyzerAvailability:

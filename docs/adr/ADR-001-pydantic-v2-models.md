@@ -1,50 +1,43 @@
 # ADR-001: Use Pydantic v2 for All Data Models
 
-**Status**: Accepted
-**Date**: 2024
-
----
+**Status:** Accepted
+**Recorded:** 2026-10-29, retrospectively (implemented in Stage 1, October 2026)
 
 ## Context
 
-RepoLens produces structured data at several layers: discovered file metadata, individual findings, per-analyzer outcomes, and the top-level scan report. This data must be:
+RepoLens produces structured data at several layers: discovery summaries, findings, per-analyzer
+outcomes, and the top-level scan report. This data must be validated at construction, precisely
+typed for `mypy` strict mode, immutable after construction, and serializable — the same models
+back the library API, the terminal reporter, and (since ADR-006) the versioned JSON document, and
+are intended to serve the planned Stage 5 web interface without a parallel schema.
 
-- Validated at construction time so that invalid states are impossible to represent.
-- Serialisable to JSON for future API and web interface stages.
-- Typed precisely enough for `mypy --strict` to verify correctness throughout the codebase.
-- Immutable after construction so that reports cannot be accidentally mutated by downstream consumers.
-
-Several approaches were considered:
-
-1. Plain Python dataclasses with manual validation.
-2. `attrs` with validators.
-3. Pydantic v1.
-4. Pydantic v2.
-
-Plain dataclasses require entirely manual validation logic and have no built-in serialisation. `attrs` provides good validation but less complete JSON serialisation. Pydantic v1 is well understood but is end-of-life and slower than v2 for validation-heavy workloads. Pydantic v2 provides a Rust-backed validation core, a clean migration from v1 patterns, first-class `model_config` for immutability, and JSON schema generation that will be needed at Stage 5 (FastAPI web interface).
-
----
+Alternatives in this space (plain dataclasses with manual validation, `attrs`, Pydantic v1) trade
+away some combination of built-in validation, JSON serialization/schema generation, and typing
+integration. Pydantic v1 is additionally end-of-life.
 
 ## Decision
 
-All data models in RepoLens use Pydantic v2. Models are defined in `models.py` using `BaseModel` with `model_config = ConfigDict(frozen=True)` where immutability is required. Validators use the `@field_validator` and `@model_validator` decorators from Pydantic v2.
-
-`ScanConfig` (in `config.py`) is also a Pydantic model, giving it the same validation and serialisation properties as the output models.
-
----
+All data models use Pydantic v2 (`pydantic>=2.7,<3.0`): the report models in `models.py`
+(`Finding`, `AIAdvisory`, `AnalyzerOutcome`, `DiscoverySummary`, `ScanReport`, `ScanResult`, and
+their supporting types) and `ScanConfig` in `config.py`. Models set
+`model_config = ConfigDict(extra="forbid", frozen=True)`; validation uses v2 `@field_validator` /
+`@model_validator` (for example evidence redaction and fingerprint generation on `Finding`). The
+Pydantic mypy plugin is enabled in `pyproject.toml`.
 
 ## Consequences
 
-**Positive**:
+Positive:
 
-- All model fields are validated at construction time. Invalid field values raise a `ValidationError` immediately rather than propagating silently.
-- `model.model_dump()` and `model.model_dump_json()` provide zero-effort serialisation for future API integration.
-- JSON schema can be generated from models without additional code, enabling OpenAPI documentation at Stage 5.
-- `mypy --strict` can verify that all model fields are used correctly because Pydantic v2 ships a mypy plugin.
-- Frozen models (`frozen=True`) prevent accidental mutation of `ScanReport` objects after construction.
+- Invalid states fail at construction with `ValidationError` instead of propagating.
+- `model_dump(mode="json")` is the single serialization path; the JSON reporter reuses it
+  verbatim (ADR-006), and JSON Schema generation comes for free for future API work.
+- Frozen models prevent accidental mutation of a completed `ScanReport`.
 
-**Negative**:
+Negative:
 
-- Pydantic v2 is a required runtime dependency. Projects embedding RepoLens as a library must accept this dependency.
-- The Pydantic v2 API differs from v1 in ways that require attention during upgrades. Contributors must use v2 patterns (e.g., `model_config`, `@field_validator` with `mode='before'`) and not v1 patterns.
-- Pydantic's validation overhead is measurable for very large collections of findings, though in practice the number of findings per scan is bounded by `max_findings`.
+- Pydantic is a required runtime dependency for anyone embedding RepoLens as a library.
+- Contributors must use v2 idioms (`model_config`, v2 validator signatures); v1 patterns will not
+  type-check.
+- Validation cost grows with finding count; in practice this is bounded per analyzer by
+  `ScanConfig.max_findings_per_analyzer` (default 200). The CLI's `--max-findings` is a separate
+  terminal-rendering cap and does not bound model construction.

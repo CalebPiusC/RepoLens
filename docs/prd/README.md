@@ -1,115 +1,92 @@
 # Product Requirements Document
 
-**Product**: RepoLens
-**Version**: 0.1.0
-**Status**: Alpha
+**Product:** RepoLens
+**Package version:** `0.1.0` (unreleased; no tagged release yet — install from the repository)
+**Status:** Alpha. Stages 1–3 are complete, including the versioned JSON output (schema `1.1.0`).
 
----
+This PRD describes intent and scope. Where it touches implemented behavior, the code, tests, and
+root README are authoritative; targets below are goals, not measured guarantees, unless a test
+enforces them.
 
-## Product Vision
+## Product vision
 
-RepoLens provides developers, CI pipelines, and security reviewers with a fast, safe, and reproducible view of a repository's health. It answers the question "what is wrong with this repository, structurally and dependency-wise, before I run or install it?" The tool operates entirely statically: it reads files, it never executes them, and it never installs anything from the target repository.
+RepoLens answers, for developers, CI pipelines, and security reviewers: "what is wrong with this
+repository — structurally, in its dependencies, docs, tests, and code quality — *before* I run or
+install it?" It is trustworthy against repositories you do not control because it is fully static:
+it reads files, never executes them, and never installs anything from the target.
 
-The guiding principle is that a health checker must be trustworthy enough to run against repositories you do not control. That trust comes from strict isolation, transparent rule definitions, and deterministic, fingerprintable output.
+## Target users
 
----
+- **Developers** maintaining Python or JS/TS projects, run locally or in CI to catch hygiene,
+  configuration, dependency, and lint/security issues early.
+- **CI pipelines** gating on documented exit codes (`0/1/2/3/130`) or consuming
+  `--format json` (single document on stdout, `result` verdict included) as an artifact or pipe
+  input — no service account, Docker, or network needed by default.
+- **Security reviewers** evaluating third-party code before adoption: committed secrets, missing
+  lockfiles/licenses, and (with `--network-checks`) known-vulnerable locked dependencies.
 
-## Target Users
+## Core requirements (implemented, Stages 1–3)
 
-**Developers maintaining open-source or internal projects**: They run RepoLens locally or in CI to catch missing documentation, misconfigured tooling, insecure dependency configurations, and code quality issues before they accumulate.
+RepoLens must:
 
-**CI pipelines**: RepoLens runs as a step in a GitHub Actions or other CI workflow. It exits with a non-zero code when findings are present, allowing the pipeline to gate merges on repository health. It requires no service account, no Docker daemon, and no network access in its default configuration.
+- Accept a repository path and produce a `ScanReport` of findings with stable rule IDs,
+  categories, severities, confidences, locations, explanations, recommendations, and verification
+  steps (see the [rules reference](../rules/README.md)).
+- Discover files within configurable resource limits, honoring the root `.gitignore` and built-in
+  directory exclusions, never following symlinks or reading sensitive files.
+- Run structure, dependency, documentation, and testing analyzers offline; Ruff/Bandit (Python)
+  and Biome (JS/TS) when already installed; and OSV.dev lookups only on explicit opt-in.
+- Isolate analyzer failures and report coverage honestly: a partial scan is *incomplete* and
+  never exits `0`.
+- Redact recognized secrets from evidence and error messages in every output format.
+- Emit a versioned JSON document (`--format json`, schema `1.1.0`) whose `result` member always
+  agrees with the exit code, with a documented compatibility/version-acceptance policy and a
+  maintained parser (`parse_json_document`, strict and forward-compatible modes).
+- Run on Python 3.11–3.13. CI exercises Ubuntu (full quality gates) and Windows (test suite);
+  macOS is a supported-by-design platform (POSIX code paths) without a dedicated CI job today.
+- Pass Ruff lint/format and strict mypy over `src` and `tests`.
 
-**Security reviewers evaluating third-party dependencies**: Before adopting a dependency, a security reviewer can run RepoLens against it to check for missing lockfiles, known-vulnerable dependencies (with `--network-checks`), secrets accidentally committed, and absent LICENSE or README files.
+RepoLens must not:
 
----
+- Execute, import, build, test, or install target-repository code or dependencies; follow
+  symlinks; load target tool configuration; access the network without opt-in; require root,
+  Docker, or credentials in default mode; or present AI-generated content as deterministic
+  findings (Stage 4 advisories remain a separate, future, opt-in type).
 
-## Core Requirements
+## Non-functional requirements
 
-### What RepoLens must do
+- **Bounded work:** discovery, per-tool, subprocess, and network budgets in `ScanConfig` bound
+  time and memory regardless of target size; each tool call has its own timeout (30 s default) so
+  one slow tool cannot stall a scan indefinitely. (No end-to-end wall-clock SLO is currently
+  measured or enforced by tests.)
+- **Determinism:** same content + options ⇒ same findings, order, and fingerprints; JSON is
+  byte-identical except `scanned_at`/`duration_ms`.
+- **Portability:** no C extensions in RepoLens itself; optional tools degrade to `unavailable`
+  outcomes instead of failures.
+- **Observability:** every analyzer records status, duration, and coverage flags; discovery
+  records skip/truncation/unreadable counts; documents carry `schema_version` separately from
+  `repolens_version`.
 
-- Accept a filesystem path to a repository root and produce a structured report of findings.
-- Discover all relevant files within configurable resource limits (file count, file size, total bytes, directory depth).
-- Respect `.gitignore` rules when deciding which files to include.
-- Run the following categories of checks: repository structure and hygiene, Python static analysis (Ruff, Bandit), JavaScript/TypeScript static analysis (Biome), dependency manifest and lockfile parsing, documentation cross-reference validation, test infrastructure checks, and (opt-in) OSV.dev vulnerability advisory lookup.
-- Produce findings with stable rule IDs, severity levels, human-readable explanations, and actionable recommendations.
-- Assign a SHA-256 fingerprint to each finding, derived from stable fields, so that findings can be deduplicated and tracked across scans.
-- Redact secrets and credentials from all evidence strings before they are stored in a report.
-- Exit with documented exit codes (0, 1, 2, 3, 130) so that CI pipelines can act on the result.
-- Run on Python 3.11, 3.12, and 3.13 on Linux, macOS, and Windows.
-- Pass `mypy --strict` type checking.
+## Out of scope (current roadmap)
 
-### What RepoLens must not do
+- Automatic remediation/fixes or PR creation; dynamic/runtime analysis; actually running tests or
+  measuring coverage (only their presence/configuration is checked).
+- Languages beyond Python and JavaScript/TypeScript.
+- Per-rule suppression (inline comments or ignore files) and user-defined rules — neither exists
+  today; `--min-severity` is the only threshold control.
+- Markdown report output (future work; text and JSON exist), GitHub-archive/ZIP scanning and the
+  web UI (Stage 5), Gemini advisories (Stage 4), container isolation (Stage 6), issue-tracker
+  integrations.
 
-- Execute any code, script, or binary from the target repository.
-- Install any package from the target repository.
-- Follow symlinks during discovery.
-- Make network requests without explicit user opt-in (`--network-checks`).
-- Store or log file content that has not been passed through the redaction layer.
-- Require root or administrator privileges.
-- Require Docker or any container runtime.
-- Require any credentials in its default (no-network) mode.
+## Success criteria
 
----
-
-## Non-Functional Requirements
-
-### Performance
-
-- A scan of a typical medium-sized repository (1,000 files, 10 MiB total) must complete in under 30 seconds on a modern developer laptop, including subprocess calls to Ruff, Bandit, and Biome where installed.
-- Discovery must complete in bounded time and memory regardless of the target repository's size, enforced by per-file and total byte caps.
-- Subprocess calls are individually bounded by a 30-second timeout. A single slow tool call cannot stall the entire scan indefinitely.
-
-### Security
-
-- No code from the target repository is trusted or executed under any circumstances.
-- Subprocess invocations use `shell=False` and an environment allowlist.
-- Sensitive filenames are detected and excluded from content reads during discovery.
-- All evidence strings are redacted before storage.
-- OSV.dev queries transmit only package name, version, and ecosystem.
-
-### Portability
-
-- RepoLens runs without modification on Linux, macOS, and Windows.
-- External tools (Ruff, Bandit, Biome) are optional: if not installed, their respective analyzers record an `unavailable` outcome and the scan continues.
-- No C extensions are required by RepoLens itself.
-
-### Determinism
-
-- Given the same repository state and the same configuration, RepoLens must produce the same set of findings with the same fingerprints.
-- Finding fingerprints must not change when non-semantic fields (such as scan timestamp or duration) change.
-
-### Observability
-
-- Each analyzer records its outcome status, duration in milliseconds, and whether coverage was truncated or incomplete.
-- Discovery records the count of skipped files and the reasons for skipping.
-- The report schema includes a version field so that consumers can detect schema changes.
-
----
-
-## Out of Scope
-
-The following items are explicitly out of scope for the current version and near-term roadmap:
-
-- Automatic remediation or pull request creation.
-- Runtime analysis or dynamic testing.
-- Code coverage measurement (RepoLens checks for coverage configuration but does not run tests).
-- Support for languages other than Python and JavaScript/TypeScript (Go, Rust, Java, etc. are not analysed).
-- A graphical user interface (a web interface is planned for Stage 5 but is not in scope for v0.1.0).
-- Integration with issue trackers or notification systems.
-- Per-rule suppression comments in source files (`.repolens-ignore` or similar).
-- Customisable rule sets or user-defined rules.
-
----
-
-## Success Metrics
-
-The following criteria indicate that v0.1.0 has met its goals:
-
-- All tests pass on Ubuntu, macOS, and Windows across Python 3.11, 3.12, and 3.13 in CI.
-- `mypy --strict` reports zero errors.
-- Ruff and Ruff format checks pass on the RepoLens source itself.
-- The tool correctly identifies the full set of expected findings when run against a set of reference repositories with known issues.
-- A scan of a 10,000-file repository completes within the subprocess timeout budget without running out of memory.
-- No secrets or credentials appear in any `Finding.evidence` field in the test suite output.
-- The `ScanReport` schema can be round-tripped through JSON without loss.
+- Full suite green in CI on Ubuntu + Windows × Python 3.11/3.12/3.13, with Ruff and strict mypy
+  clean — including the repository self-scan test (RepoLens scanning itself reports nothing at or
+  above `low`, except the intentional `RL-DEP-005` info note).
+- JSON documents round-trip through `parse_json_document` in both modes; unknown-member tolerance
+  and unknown-value refusal are covered by `tests/unit/test_json_output.py`; document and exit
+  code never disagree in CLI tests.
+- No test requires network access or installed Ruff/Bandit/Biome (stub executables and in-memory
+  OSV transports only), and no finding evidence in the suite contains an unredacted secret fixture.
+- A scan that could not see the whole repository is never reported clean, in text, JSON, or exit
+  code.

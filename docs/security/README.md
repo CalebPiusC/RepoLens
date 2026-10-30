@@ -1,127 +1,162 @@
 # Security Model
 
-This document describes the security boundaries that RepoLens enforces when scanning a repository, explains what it does and does not do with the data it reads, and provides guidance for reporting security issues in RepoLens itself.
+RepoLens is designed to inspect repositories it does not trust. This document states what it does
+and does not do, where each guarantee is enforced, and — just as importantly — the limits of
+those guarantees. The root README's "Security model" is a summary of this page.
 
----
+## What RepoLens does and does not do
 
-## What RepoLens Does and Does Not Do
+**RepoLens does:**
 
-**RepoLens does**:
+- Walk the target tree and read discovered, non-sensitive, size-bounded file contents through
+  `RepositoryContext.read_text()` for static checks.
+- Invoke already-installed external tools (Ruff, Bandit, Biome) as child processes, passing them
+  discovered file paths as arguments.
+- Optionally query OSV.dev with package coordinates only, when network checks are explicitly
+  enabled.
+- Redact recognized secrets from finding evidence and from analyzer/CLI error messages before
+  they are stored or printed, in both text and JSON output (JSON is serialized from the same
+  models).
+- Record the presence of sensitive filenames without reading their contents, and report unignored
+  ones as `RL-SEC-001`.
 
-- Read file content from the target repository for static analysis.
-- Invoke external linting tools (Ruff, Bandit, Biome) as child processes with the target files as arguments.
-- Optionally query the OSV.dev batch API with package names, version strings, and ecosystems (only when `--network-checks` is passed).
-- Redact secrets and credentials from all evidence strings before they are stored in a finding.
-- Record the presence of sensitive filenames (`.env`, SSH private keys, PEM certificates) without reading their content.
+**RepoLens does not:**
 
-**RepoLens does not**:
+- Execute any code, script, or binary from the target repository (no `setup.py`, no npm scripts,
+  no test suites, no build steps), or import target Python modules.
+- Install or resolve packages from the target repository, or install its own optional tools.
+- Follow symbolic links during discovery.
+- Make network requests by default, or require credentials, root, or Docker.
+- Write into the target repository. The only writes are disposable tool workspaces under the
+  system temp directory (including the generated Biome config), which are cleaned up by
+  `TemporaryDirectory`; reports go to stdout only.
 
-- Execute any code, script, or binary from the target repository.
-- Import any Python module from the target repository.
-- Install any package from the target repository or from any package index.
-- Follow symbolic links during file discovery.
-- Make network requests in its default configuration.
-- Write any data to disk (except temporary directories used by subprocess invocations, which are cleaned up on exit).
-- Store reports anywhere; output goes to stdout only.
-- Require or use credentials in its default configuration.
+## Discovery safety (`discovery.py`)
 
----
+### Symlinks
 
-## Discovery Safety
+- The walk uses `entry.is_symlink()` / `follow_symlinks=False`: symlinked files and directories
+  are skipped, counted in `DiscoverySummary.skipped_symlink_count`, and their paths are retained
+  on `RepositoryContext.skipped_symlinks` (the serialized report carries the count, not the
+  paths). Skipped symlinks alone do not make a scan incomplete.
+- A symlinked repository root is rejected before scanning (`reject_symlink_root`, default `True`;
+  the CLI always uses the default). Programmatic callers may set it to `False`, in which case the
+  root is canonicalized with `resolve(strict=True)` and every entry must still resolve inside it.
+- Entries that escape the canonical root abort discovery (`DiscoveryAbortedError`).
 
-### Symlink Rejection
+### File reads and TOCTOU scope
 
-The discovery walk never follows symbolic links. When a symlink is encountered (whether pointing to a file or a directory), it is recorded in the `DiscoverySummary` as skipped and excluded from all analysis. This prevents a malicious or misconfigured repository from causing RepoLens to read files outside the repository tree, such as system files or files from other users' home directories.
+Contents are read only through `RepositoryContext.read_text()`, which:
 
-### O_NOFOLLOW on File Reads
+1. Rejects unsafe relative paths (absolute, backslashes, NUL, `..`).
+2. Requires the file to be part of safe discovery, non-sensitive, and within the per-file size
+   cap.
+3. Refuses if the target is now a symlink, and requires the resolved path to stay inside the
+   canonical root.
+4. Opens with `os.O_RDONLY | O_NOFOLLOW` **where `O_NOFOLLOW` exists** (POSIX: Linux, macOS). A
+   symlink swapped in after listing then fails at `open()` (`ELOOP`). On platforms without
+   `O_NOFOLLOW` (notably Windows) steps 1–3 still apply, but there is no kernel-level guarantee
+   against a swap in the remaining race window.
 
-File reads during discovery use `O_NOFOLLOW` at the `open()` call level. This prevents TOCTOU (time-of-check/time-of-use) races: even if a symlink is created between the directory listing step and the file read step, the kernel rejects the open call.
+Discovery itself does not read file contents except the root `.gitignore` (through the same
+path). External tools open the files they receive with their own I/O; they are given only paths
+that already passed discovery (never sensitive, oversized, ignored, or symlinked entries), and
+tool-reported paths are accepted only if they resolve back inside the root.
 
-### Sensitive File Detection
+### Sensitive files
 
-Discovery maintains a list of sensitive filename patterns: `.env` files, SSH private key files (`id_rsa`, `id_ed25519`, etc.), PEM certificate and key files, credential store files, and similar. When a file matches a sensitive pattern, its path is recorded in the `DiscoverySummary` but its content is not read. A corresponding finding may be raised by the structure analyzer to alert the user that a sensitive file is present and unignored.
+`classify_sensitive_file()` covers `.env` and `.env.*` (except safe templates: `.env.example`,
+`.env.sample`, `.env.template`, `.env.dist`, `.env.defaults`, `.env.schema`), `.pypirc`,
+`.netrc`, `.git-credentials`, SSH private keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`),
+`credentials.json`, `client_secret.json`, `.streamlit/secrets.toml`, `service-account*.json`,
+and extensions `.pem`, `.key`, `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx`. Matching files are
+counted in `sensitive_files_detected`; `read_text()` and tool file-selection exclude them.
 
-### Resource Limits
+### `.gitignore`, exclusions, and resource limits
 
-Discovery enforces the following limits to prevent resource exhaustion and to bound scan duration:
+- Only the **root** `.gitignore` is evaluated (a deterministic built-in matcher, including
+  negations and directory-only patterns). Nested `.gitignore` files are discovered as ordinary
+  files but not applied.
+- Convention directories (`.git`, `node_modules`, `.venv`, `dist`, build/cache outputs, and
+  similar; see `DEFAULT_EXCLUDED_DIRS`) are never entered.
+- Defaults: 10,000 files, 1 MiB per file, 50 MiB total counted bytes, 64-level walk depth.
+  Reaching a file/byte cap, skipping over-depth subtrees, and unreadable directories/entries are
+  all recorded in `DiscoverySummary` and make the scan incomplete (exit `3`, or `1` if findings
+  take precedence) — partial coverage is never reported as clean.
 
-| Limit | Default |
-|---|---|
-| Maximum files | 10,000 |
-| Maximum size per file | 1 MiB |
-| Maximum total bytes across all files | 50 MiB |
-| Maximum directory depth | 64 levels |
+## Subprocess safety (`subprocess_runner.py`, `analyzers/tooling.py`)
 
-When any limit is hit, discovery stops and marks the `DiscoverySummary` as truncated. Truncated scans are never reported as clean: the report explicitly records that coverage was incomplete.
+All tool execution goes through `run_safe_command()`:
 
-### Unreadable Entries
+- **`shell=False`, always.** Arguments are a validated list; a shell string is rejected.
+  `subprocess.Popen` is used for the tool itself (the one `subprocess.run()` call in the module
+  is the fixed-argument Windows `taskkill` helper). Repository file paths containing shell
+  metacharacters are therefore inert.
+- **Environment allowlist.** Children inherit only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `HOME`,
+  `TMPDIR`, `TEMP`, `TMP`, `SYSTEMROOT`, and `PATHEXT` when present, plus forced values
+  (`CI=1`, `NO_COLOR=1`, `TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `PIP_DISABLE_PIP_VERSION_CHECK=1`,
+  `PYTHONDONTWRITEBYTECODE=1`, `NODE_NO_WARNINGS=1`). Host secrets in other variables do not
+  propagate. Explicit `extra_env` additions are validated (no NUL/`=` in keys).
+- **Executable resolution** happens on that sanitized `PATH`. Availability probing runs only the
+  tool's `--version` in a disposable workspace.
+- **Working directory:** callers pass a disposable workspace outside the repository
+  (`tooling.tool_workspace()`); `run_safe_command` requires a real, non-symlink directory.
+  Repository tool configuration is not loaded (Ruff `--isolated`; generated Biome config via
+  `--config-path`; project config presence is reported, not used).
+- **Timeouts kill the whole tree.** POSIX: new session (`start_new_session`) and `killpg`
+  `SIGTERM` → `SIGKILL`. Windows: `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` plus
+  `taskkill /F /T /PID` with a `kill()` fallback. RepoLens does **not** use Windows Job Objects.
+- **Output caps:** stdout and stderr are each capped at `subprocess_max_output_bytes` (5 MiB by
+  default) on reader threads; truncation is flagged rather than growing memory without bound.
+  Stdin is `DEVNULL`.
 
-If a directory or file cannot be read due to a permission error or I/O error, the entry is recorded in the `DiscoverySummary` as unreadable and the scan is marked incomplete. RepoLens never silently skips unreadable content and then reports a clean result.
+## Secret redaction (`redaction.py`)
 
----
+`redact_secrets()` scrubs PEM private-key material; GitHub, AWS, Google/Gemini, Anthropic/OpenAI,
+Stripe, Slack, PyPI, and npm token shapes; JWTs; credential-bearing URLs; `Authorization`
+values; and generic secret assignments (quoted and unquoted), preserving known safe placeholders.
+It is applied by model validators to `Finding.evidence` (truncated to 500 chars) and
+`AnalyzerOutcome.message`, and explicitly to CLI diagnostics and subprocess stderr surfaces.
 
-## Subprocess Safety
+Scope note: redaction covers those evidence/message fields. Finding titles, explanations, and
+recommendations are constructed by RepoLens (or from bounded tool diagnostics) rather than copied
+from sensitive files — sensitive files are never read at all, which is the primary control.
+Redaction is best-effort pattern matching, not a formal guarantee that no secret-shaped string
+can ever appear; treat reports as sensitive until reviewed.
 
-All external tool invocations (Ruff, Bandit, Biome) go through `SubprocessRunner` in `subprocess_runner.py`.
+## OSV.dev data minimization (`osv.py`, `analyzers/advisories.py`)
 
-### shell=False
+Enabled only by `--network-checks` / `ScanConfig(enable_network_checks=True)`:
 
-Every `subprocess.run()` call uses `shell=False`. Commands are passed as lists of strings. No shell string interpolation occurs. This means that file paths from the target repository containing shell metacharacters (semicolons, backticks, dollar signs, etc.) cannot cause unintended shell commands to be executed.
+- HTTPS only to the constant `https://api.osv.dev` origin (`/v1/querybatch`,
+  `/v1/vulns/<id>`); paths are validated and redirects are rejected, never followed.
+- Payloads contain only package `name`, `version`, and `ecosystem` — no file paths, contents,
+  repository names, environment, or credentials. A fixed `User-Agent` is sent.
+- Bounded by per-request timeout (default 10 s), a total lookup budget, response-size cap
+  (default 2 MiB, checked against `Content-Length` and actual bytes), batches of 100, and
+  package/advisory caps (defaults 300/50). Packages beyond the cap mark coverage partial.
+- Outcomes are explicit: timeout → `timed_out`; connection/HTTP failure after the check started
+  → `unavailable` with `coverage_incomplete=True` (scan incomplete, never a silent clean);
+  unreadable payloads → `failed`. A vulnerability is reported only with an advisory ID returned
+  by OSV.dev; unrated advisories are medium/low-confidence and labelled estimated.
 
-### Environment Allowlist
+## Analyzer fault isolation
 
-Child processes receive only an explicit allowlist of environment variables. `PATH` is included so that tools can be located. Variables such as `HOME` and `TMPDIR` are included where required for tool operation. No other variables from the parent process environment are inherited. This prevents secrets and credentials that may be present in the CI or developer environment (API keys, database passwords, proxy credentials) from leaking to child processes.
+With `fail_fast=False` (default, and always in the CLI), one analyzer's failure, timeout, or
+broken probe is recorded as its outcome and the rest of the scan continues; completeness is then
+reflected in `result.is_complete` / the exit code rather than hidden. Analyzers that never
+started (`unavailable` without `coverage_incomplete`, or `skipped`) do not by themselves make a
+scan incomplete.
 
-### Process-Group Timeouts
+## Reporting a vulnerability in RepoLens
 
-Each subprocess is started in a new process group (a POSIX session group on Linux and macOS, a Windows Job Object on Windows). When the timeout expires, the entire process group is terminated. This prevents orphaned child processes from continuing to consume resources after RepoLens exits or after a timeout is enforced.
+Please do **not** open a public issue for a vulnerability in RepoLens itself. Report it privately
+to the repository owner through GitHub (the repository's **Security** tab → *Report a
+vulnerability*, when private reporting is available there), including a description, reproduction
+steps, impact, and a suggested fix if you have one. Coordinated disclosure — keeping details
+private until a fix is available — is appreciated. This policy makes no response-time commitment.
 
-### Output Caps
-
-Standard output and standard error from each subprocess are capped at `subprocess_max_output_bytes` (5 MiB by default). Output beyond this cap is discarded. This prevents a misbehaving tool from consuming unbounded memory.
-
-### Disposable Working Directories
-
-External tools are invoked in a temporary working directory, not in the target repository directory. For the JS/TS linter (Biome), RepoLens generates its own Biome configuration in the temporary directory rather than using any `biome.json` that may be present in the target repository. This prevents the target repository's tooling configuration from influencing the analysis.
-
----
-
-## Secret Redaction
-
-All evidence strings and error messages produced during analysis are passed through the redaction module (`redaction.py`) before they are stored in a `Finding` or included in the report. The redaction module applies pattern matching to detect and replace:
-
-- API keys and bearer tokens.
-- Private key PEM blocks.
-- JSON Web Tokens (JWTs).
-- Credential-bearing URLs (for example, `https://user:password@host/path`).
-- Common environment variable assignment patterns for secrets (for example, `SECRET_KEY=...`).
-
-Redaction is applied at the point of data entry into models, not at render time. This means that redacted content never appears in any serialised form of the report, including JSON output.
-
----
-
-## OSV.dev Data Minimisation
-
-When `--network-checks` is enabled, the advisories analyzer queries `api.osv.dev/v1/querybatch`. The following constraints are applied:
-
-- Only HTTPS is used. HTTP URLs are rejected unconditionally.
-- HTTP redirects are not followed.
-- The request payload contains only: package `name`, `version`, and `ecosystem`. No file content, no repository path, no repository name, and no user identity are transmitted.
-- The response size is capped to prevent unbounded memory consumption from a large response.
-- A request timeout is enforced.
-- Any network error causes the advisories analyzer to record a `failed` outcome; it does not cause the scan to abort.
-
----
-
-## Reporting Security Issues
-
-If you discover a security vulnerability in RepoLens itself (not a vulnerability in a repository that RepoLens is scanning), please report it privately rather than opening a public GitHub issue.
-
-Send a description of the issue to the repository maintainer via the GitHub Security Advisories feature: navigate to the repository on GitHub, click "Security", then "Report a vulnerability". Include:
-
-- A clear description of the vulnerability.
-- Steps to reproduce it.
-- The potential impact.
-- If possible, a suggested fix.
-
-The maintainer will acknowledge the report within five business days and will work with you to determine an appropriate disclosure timeline. Public disclosure will not occur before a fix is available.
+> Maintainer note: as of this writing, GitHub private vulnerability reporting is **not** enabled
+> on `CalebPiusC/RepoLens`, so the button above will not appear until the owner enables it
+> (Settings → Security → Private vulnerability reporting). Enabling it is the recommended way to
+> make these instructions actionable.

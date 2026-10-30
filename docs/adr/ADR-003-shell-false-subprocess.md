@@ -1,45 +1,47 @@
-# ADR-003: Always Use `shell=False` and a Sanitised Environment for Subprocesses
+# ADR-003: Always Use `shell=False` and a Sanitized Environment for Subprocesses
 
-**Status**: Accepted
-**Date**: 2024
-
----
+**Status:** Accepted
+**Recorded:** 2026-10-29, retrospectively (implemented in Stages 1–2, October 2026)
 
 ## Context
 
-Three analyzers in RepoLens invoke external tools: `python_lint.py` calls Ruff and Bandit, and `jsts_lint.py` calls Biome. These tools receive file paths from the target repository as arguments.
-
-When Python's `subprocess` module is called with `shell=True`, the command string is passed to the system shell (`/bin/sh` on POSIX, `cmd.exe` on Windows). This creates two classes of risk:
-
-1. **Shell injection**: If any part of the command string is constructed from user-controlled data (such as file paths from the target repository), a crafted path containing shell metacharacters could cause the shell to execute unintended commands.
-2. **Environment leakage**: A child process inherits the full environment of the parent by default. This environment may contain API keys, credential tokens, database connection strings, proxy passwords, or other sensitive values passed to RepoLens by its calling context (CI system, developer shell, etc.). A child process that logs its environment, or a tool that uses certain environment variables in unexpected ways, could expose these values.
-
-Both risks are present when scanning untrusted repositories. File paths inside a repository cannot be assumed to be safe strings.
-
----
+The Ruff, Bandit, and Biome analyzers pass target-repository file paths to external tools. With
+`shell=True`, a crafted path could inject shell syntax. With a default inherited environment, CI
+or developer secrets (API keys, tokens, credentials) would leak into child processes that process
+untrusted input. Tools also need bounded time/output and must not load the target's own tool
+configuration.
 
 ## Decision
 
-All subprocess calls in RepoLens go through `SubprocessRunner` in `subprocess_runner.py`. This module enforces two invariants unconditionally:
+Every tool invocation goes through `run_safe_command()` in `subprocess_runner.py` (there is no
+`SubprocessRunner` class), which unconditionally:
 
-1. `shell=False` on every `subprocess.run()` / `subprocess.Popen()` call. Commands are passed as lists of strings. No shell interpolation occurs.
-2. The child process environment is constructed from an explicit allowlist of variable names. `PATH` is included so that tools can be located. Variables such as `HOME` and `TMPDIR` are included where needed for tool operation. No other variables from the parent environment are inherited.
-
-In addition, `SubprocessRunner` runs each tool in a disposable temporary working directory (not the target repository directory), caps output at `subprocess_max_output_bytes`, and kills the entire process group on timeout.
-
----
+1. Executes with `subprocess.Popen(..., shell=False)` and a validated argument list; passing a
+   shell string raises `SubprocessExecutionError`. The executable is resolved on the sanitized
+   `PATH`.
+2. Builds the child environment from an allowlist (`PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `HOME`,
+   `TMPDIR`, `TEMP`, `TMP`, `SYSTEMROOT`, `PATHEXT`) plus forced safe values (`CI`, `NO_COLOR`,
+   `TERM=dumb`, `GIT_TERMINAL_PROMPT`, pip/Python/Node quieting flags). Additional variables
+   require an explicit, validated `extra_env`.
+3. Requires a real, non-symlink working directory. Analyzer code (via
+   `analyzers/tooling.tool_workspace()`) passes a disposable directory outside the repository;
+   the runner itself does not choose the directory.
+4. Caps stdout and stderr **independently** at `subprocess_max_output_bytes` and enforces a hard
+   timeout that terminates the whole tree: POSIX new session + `killpg` (`SIGTERM` then
+   `SIGKILL`); Windows `CREATE_NEW_PROCESS_GROUP` + `taskkill /F /T /PID` (with a `kill()`
+   fallback). No Windows Job Objects are used.
 
 ## Consequences
 
-**Positive**:
+Positive:
 
-- Shell injection via crafted file paths is structurally impossible because no shell is involved.
-- Parent process credentials and secrets cannot leak to child processes through environment inheritance.
-- Timeout enforcement kills the entire process group, not just the direct child, preventing orphaned subprocesses from consuming resources after RepoLens exits.
-- The allowlist approach means that adding a new environment variable to the child requires an explicit code change, making leakage decisions visible in code review.
+- Shell injection through repository paths is structurally impossible; parent secrets cannot leak
+  by inheritance; timed-out tools cannot orphan grandchildren (including through Windows `.cmd`
+  shims); allowlist additions are deliberate, reviewable code changes.
 
-**Negative**:
+Negative:
 
-- Some tools rely on environment variables that are not in the allowlist (for example, tool-specific config paths or proxy settings). Such variables must be explicitly added to the allowlist when a new tool is integrated, which requires investigation of each tool's behaviour.
-- On Windows, process group termination requires a Job Object approach rather than POSIX session groups. This adds platform-specific code to `SubprocessRunner`.
-- Developers running RepoLens in environments with non-standard `PATH` configurations may need to ensure that Ruff, Bandit, and Biome are discoverable on the allowed `PATH`.
+- A tool needing an unusual environment variable will not see it until someone adds it to the
+  allowlist or passes `extra_env`.
+- Termination and executable probing need platform-specific code paths (POSIX sessions vs Windows
+  process groups/`taskkill`), which the test suite exercises via stub launchers on both.

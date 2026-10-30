@@ -1,40 +1,43 @@
 # ADR-002: Never Follow Symlinks During Discovery
 
-**Status**: Accepted
-**Date**: 2024
-
----
+**Status:** Accepted
+**Recorded:** 2026-10-29, retrospectively (implemented in Stage 1, October 2026)
 
 ## Context
 
-RepoLens scans arbitrary third-party repositories. A repository may contain symbolic links that point to locations outside the repository tree, including sensitive system files, other user home directories, or device nodes. Following such links during a recursive walk would:
-
-- Allow a malicious or misconfigured repository to cause RepoLens to read files it has no business reading.
-- Produce findings that reference files outside the scanned project, confusing the report.
-- Enable symlink loop attacks that could cause an infinite traversal.
-- Undermine the resource limits (byte caps, file count caps) that bound scan duration and memory use, because those limits are designed around the expected size of the target repository rather than the entire filesystem.
-
-An alternative approach considered was to follow symlinks that resolve to paths within the repository root. This is more permissive and would handle the legitimate use case of a monorepo that symlinks shared code. However, safe resolution of "within the repository root" is non-trivial: it requires resolving the canonical path of the target and checking that it is a strict subdirectory of the canonical path of the root, accounting for race conditions between the resolution check and the actual read.
-
----
+RepoLens scans arbitrary third-party repositories. A symlink can point outside the tree
+(system files, other users' data, device nodes), create traversal loops, or defeat the resource
+caps that assume repository-sized input. Following only links that resolve inside the root was
+considered, but doing that race-free requires canonical-path validation at every read, for a
+legitimate use case (symlinked shared/monorepo trees) that can be revisited if demand appears.
 
 ## Decision
 
-RepoLens never follows symlinks. When the discovery walk encounters a symlink (whether to a file or a directory), it records the symlink's path in the `DiscoverySummary` and skips it. The scan is not marked incomplete solely because symlinks were skipped; symlink skipping is considered normal behaviour. However, if a symlink points to something that a user would reasonably expect to be scanned (such as a `src` directory that is itself a symlink), the discovery summary will record that the entry was skipped, and the user can investigate.
+Discovery never follows symlinks:
 
-All file reads in the discovery path use `O_NOFOLLOW` at the `open()` call level to enforce this policy even in the presence of TOCTOU races: a symlink that did not exist at directory listing time but was created before the open call will be rejected by the kernel.
-
----
+- Symlinked files/directories are skipped. Their paths are kept on
+  `RepositoryContext.skipped_symlinks`; the serialized `DiscoverySummary` records the count
+  (`skipped_symlink_count`). Skipped symlinks alone do not mark a scan incomplete — but content
+  reachable *only* through a symlink is simply not analyzed, which the count makes visible.
+- A symlinked repository root is rejected by default (`ScanConfig.reject_symlink_root=True`; the
+  CLI always uses the default). Library callers who disable it still get a canonicalized root and
+  per-entry root-escape checks.
+- Contents are read only via `RepositoryContext.read_text()`, which re-checks symlink/root
+  constraints and opens with `O_NOFOLLOW` where available (POSIX), so a link swapped in after
+  listing fails at `open()` there. On platforms without `O_NOFOLLOW` (notably Windows) the
+  pre-open checks apply without the kernel-level guarantee; see ADR-003's sibling concern in the
+  [security model](../security/README.md#file-reads-and-toctou-scope).
 
 ## Consequences
 
-**Positive**:
+Positive:
 
-- No symlink traversal attack is possible. Malicious or accidental symlinks cannot cause RepoLens to read files outside the repository.
-- The implementation is simple and unconditional. There are no edge cases around "allowed" versus "disallowed" symlinks.
-- TOCTOU safety is enforced at the kernel level via `O_NOFOLLOW`, not just at the policy level.
+- No symlink traversal outside the repository, no link-loop traversal, no cap evasion via links.
+- One unconditional rule; no "allowed link" edge cases.
 
-**Negative**:
+Negative:
 
-- Repositories that use symlinks for legitimate purposes (shared source trees, monorepo patterns) will have those symlinked paths excluded from analysis. This is recorded in the summary but may surprise users.
-- A future ADR may revisit this decision for opt-in symlink following with strict canonical path validation, if the demand from monorepo users is significant.
+- Repositories that symlink source trees have those paths excluded (visible via
+  `skipped_symlink_count`, but potentially surprising).
+- The POSIX/Windows TOCTOU asymmetry above must be documented honestly rather than papered over.
+- An opt-in, canonically-validated link-following mode would need a superseding ADR.

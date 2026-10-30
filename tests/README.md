@@ -1,123 +1,111 @@
 # Test Suite
 
-This document describes the organisation of the RepoLens test suite, how to run subsets of tests, and what assumptions the tests make about the environment.
+How the tests are organized, what they assume, and how to run subsets. Setup uses `pip` in a
+virtual environment (there are no Hatch environments configured; see
+[docs/contributing/README.md](../docs/contributing/README.md)):
 
----
-
-## Directory Structure
-
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
 ```
+
+## Layout
+
+```text
 tests/
-  conftest.py              Shared fixtures: temporary directories, stub executables,
-                           sample file trees, ScanConfig overrides.
-  unit/                    Unit tests for individual modules and functions.
-  integration/             End-to-end tests that exercise the full scan pipeline.
-  security/                Tests that verify security invariants: symlink safety,
-                           subprocess isolation, redaction correctness.
+  conftest.py      Shared fixtures (below)
+  unit/            Module/behavior tests in isolation
+  integration/     End-to-end pipeline and installed-entry-point tests
+  security/        Threat-boundary tests: symlink safety, no target-code
+                   execution, subprocess isolation, redaction
 ```
+
+### Shared fixtures (`conftest.py`)
+
+| Fixture | Purpose |
+| --- | --- |
+| `_clear_tool_availability_cache` (autouse) | Prevents cached external-tool probes leaking between tests. |
+| `make_python_repo` / `make_jsts_repo` | Minimal healthy Python / TypeScript repository trees under `tmp_path`, with include/exclude knobs (license, readme, gitignore, manifests, tests, lockfiles). |
+| `install_fake_tool` | Creates a stub `ruff`/`bandit`/`biome` executable (a Python implementation behind a native launcher: a `.cmd` shim on Windows, a shell wrapper elsewhere) in a temp bin directory and puts it on `PATH`, so tests exercise the real subprocess path without the real tools. |
+| `make_symlink` | Creates symlinks, skipping cleanly where the host forbids it (see Windows notes). |
+| `short_root`, `make_nested_directories` | Short scratch roots and deep trees for the 64-level depth-limit tests. |
+| `make_finding`, `make_scan_report` | Valid `Finding`/`ScanReport` factories for reporting, CLI, and JSON tests. |
 
 ### `unit/`
 
-Unit tests target individual functions and classes in isolation. Dependencies on the filesystem are provided through `tmp_path` fixtures. Dependencies on external tools are replaced by stub executables.
+One file per module or cohesive behavior area. Current files:
 
-Each unit test file corresponds to one source module or one cohesive area of behaviour. Examples: `test_discovery.py` covers the discovery walk logic, `test_redaction.py` covers the redaction patterns, `test_models.py` covers Pydantic model validation.
+| File | Area |
+| --- | --- |
+| `test_advisories_analyzer.py` | OSV analyzer incl. opt-in, caps, and incomplete-coverage failure modes |
+| `test_biome_analyzer.py` | Biome output parsing and severity/category mapping |
+| `test_cli.py` | Argument parsing, exit codes, text/JSON dispatch via a fake engine |
+| `test_dependencies.py` | Manifest/lockfile parsing into the dependency inventory |
+| `test_dependency_analyzer.py` | `RL-DEP-*` rules |
+| `test_discovery_failures.py` | Unreadable entries, caps, depth limits |
+| `test_docs_and_testing.py` | `RL-DOC-*` and `RL-TEST-*` rules |
+| `test_engine.py` | Engine lifecycle — including `test_repolens_repository_passes_self_scan`, which scans this repository itself |
+| `test_engine_stage2.py` | Stage 2 lifecycle cases (skips, unavailability, partial coverage) |
+| `test_json_output.py` | JSON document shape, determinism, `result` semantics, schema-version acceptance, strict/forward-compatible parsing |
+| `test_models.py` | Pydantic model validation, fingerprints, redaction-at-entry |
+| `test_osv.py` | OSV.dev client against mocked transports (no live network) |
+| `test_python_analyzers.py` | Ruff/Bandit parsing and severity mapping |
+| `test_reporting.py` | Terminal rendering and verdict evaluation |
+| `test_structure_analyzer.py` | `RL-STRUCT-*` / `RL-SEC-001` rules |
+| `test_tooling.py` | Tool probing, file selection, workspaces, path mapping |
 
 ### `integration/`
 
-Integration tests exercise the complete scan pipeline from the CLI entry point or from `ScanEngine.scan()` down to the assembled `ScanReport`. They use real (temporary) file trees on disk.
-
-| File | What it tests |
-|---|---|
-| `test_cli_entry_point.py` | CLI argument parsing, exit codes, and stdout format for a set of representative repository fixtures. |
-| `test_stage2_scan.py` | Full scan pipeline including the dependency, documentation, testing, and lint analyzers against fixture repositories. |
+| File | What it proves |
+| --- | --- |
+| `test_cli_entry_point.py` | The installed `repolens` console script (or `python -m repolens`) in a real subprocess: packaging, stdout/stderr behavior in both formats, real exit codes. |
+| `test_stage2_scan.py` | The full default analyzer suite over fixture repositories with stubbed tools, end to end through `ScanEngine`. |
 
 ### `security/`
 
-Security tests verify that specific threat scenarios are handled correctly and cannot be exploited. They are kept separate from unit and integration tests so they can be run independently and so their purpose is immediately clear.
+Kept separate so the threat-boundary guarantees are easy to find and run alone
+(`pytest tests/security`):
 
-| File | What it tests |
-|---|---|
-| `test_discovery_safety.py` | Symlink rejection (files and directories), `O_NOFOLLOW` enforcement, sensitive file exclusion, depth limit enforcement, byte cap enforcement. |
-| `test_stage2_safety.py` | That no code from the target repository is executed during a full Stage 2 scan. |
-| `test_subprocess_and_redaction.py` | That `SubprocessRunner` uses `shell=False`, that the child environment contains only allowlisted variables, and that evidence containing secrets is redacted before it appears in findings. |
+| File | Invariants |
+| --- | --- |
+| `test_discovery_safety.py` | Symlinks never followed, symlinked root rejected, post-discovery symlink swap refused by `read_text`, sensitive contents never read, caps enforced |
+| `test_stage2_safety.py` | A full scan never executes target-repository code, scripts, or configuration |
+| `test_subprocess_and_redaction.py` | `shell=False`, allowlisted child environment, whole-tree timeouts, secrets redacted from evidence/messages |
 
----
+## Markers
 
-## Stub Executables
-
-The `python_lint.py` and `jsts_lint.py` analyzers invoke Ruff, Bandit, and Biome as subprocesses. The test suite does not require these tools to be installed. Instead, `conftest.py` provides fixtures that create stub executables in temporary directories and prepend those directories to `PATH` for the duration of the test.
-
-Stub executables are small shell scripts or Python scripts that write a fixed JSON or text response to stdout and exit with a configured exit code. This allows tests to verify that the analyzer correctly parses tool output without depending on the real tool being installed or producing consistent output across versions.
-
----
-
-## Pytest Markers
+One custom marker is registered in `pyproject.toml` (with `--strict-markers`):
 
 | Marker | Meaning |
-|---|---|
-| `network` | Test requires outbound network access to OSV.dev. Not run by default. |
+| --- | --- |
+| `network` | *Documentation of the network boundary:* tests that exercise the OSV.dev client **against a mocked transport**. No test currently carries this marker and nothing calls live services, so `pytest -m network` collects nothing today, and the default run neither needs nor performs network access. Do not describe these as skipped-by-default live tests. |
 
-To run only network tests:
+All other markers in use are built-ins (`parametrize`, `skipif` for platform capabilities).
 
-```bash
-pytest -m network
-```
-
-To explicitly exclude network tests (the default in CI without the `--network-checks` environment):
+## Running tests
 
 ```bash
-pytest -m "not network"
+pytest                                        # everything
+pytest --cov=repolens --cov-report=term-missing
+pytest tests/unit                             # one directory (or tests/integration, tests/security)
+pytest tests/security/test_discovery_safety.py  # one file
+pytest -k test_symlink_repository_root_is_rejected  # one test by name
+pytest -v                                     # verbose
 ```
 
----
+## Environment assumptions
 
-## Running the Test Suite
-
-**Run everything**:
-
-```bash
-hatch run pytest
-```
-
-**Run with coverage**:
-
-```bash
-hatch run pytest --cov=src/repolens --cov-report=term-missing
-```
-
-**Run one directory**:
-
-```bash
-hatch run pytest tests/security
-hatch run pytest tests/unit
-hatch run pytest tests/integration
-```
-
-**Run one file**:
-
-```bash
-hatch run pytest tests/security/test_discovery_safety.py
-```
-
-**Run one test by name**:
-
-```bash
-hatch run pytest -k test_symlink_directory_is_rejected
-```
-
-**Run with verbose output**:
-
-```bash
-hatch run pytest -v
-```
-
----
-
-## What Is Not Required
-
-- **Ruff** does not need to be installed to run the test suite. Tests for `python_lint.py` use stub executables.
-- **Bandit** does not need to be installed. Same as Ruff.
-- **Biome** does not need to be installed. Tests for `jsts_lint.py` use stub executables.
-- **Network access** is not required. Tests marked `network` are skipped by default.
-- **Root or administrator privileges** are not required for any test.
-- **Docker** is not required.
+- **Not required:** Ruff, Bandit, Biome, Node.js, network access, root/administrator rights, or
+  Docker. Tools are stubbed via `install_fake_tool`; OSV.dev is replaced with in-memory
+  transports.
+- **Windows capabilities are handled by skipping, never by weakening assertions:** symlink tests
+  skip when the host cannot create symlinks (unprivileged Windows without Developer Mode; the CI
+  Windows runner can); depth-limit tests nest single-character directories under a short scratch
+  root and skip if the filesystem still refuses (~260-char path limits); directory-permission
+  tests skip where `chmod` is not enforced (Windows).
+- CI runs the suite on Ubuntu with the full quality gates and on Windows with
+  `python -m pytest -q`, across Python 3.11–3.13 (`.github/workflows/ci.yml`).
+- The self-scan test scans this working tree, so repository changes — including documentation
+  links from the root README and committed assets over the 1 MiB per-file budget — can fail it.
+  Run the suite at your branch's final head.

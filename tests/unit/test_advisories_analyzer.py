@@ -321,8 +321,8 @@ def test_package_cap_makes_the_scan_incomplete_end_to_end(tmp_path: Path) -> Non
     assert determine_exit_code(report) == EXIT_OPERATIONAL
 
 
-def test_findings_cap_alone_does_not_mark_coverage_partial(tmp_path: Path) -> None:
-    """Dropping surplus *findings* never hides coverage: findings still force exit 1."""
+def test_findings_cap_marks_reporting_failure_not_partial_file_coverage(tmp_path: Path) -> None:
+    """Omitted findings are incomplete even when all requested packages were queried."""
     repo = _pinned_python_repo(tmp_path)
     vulnerabilities = [
         OsvVulnerability(
@@ -346,6 +346,7 @@ def test_findings_cap_alone_does_not_mark_coverage_partial(tmp_path: Path) -> No
 
     assert len(findings) == 2
     assert analyzer.coverage_partial() is False
+    assert "additional findings were omitted" in (analyzer.reporting_failure() or "")
 
 
 def test_network_failure_after_start_marks_coverage_incomplete(tmp_path: Path) -> None:
