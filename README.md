@@ -52,21 +52,105 @@ RepoLens itself has no runtime requirement on Ruff, Bandit, Biome, Node.js, or n
 
 ## Installation
 
-RepoLens requires Python `>= 3.11`.
+RepoLens requires Python `>= 3.11` and `pip`, and is installed directly from GitHub — it is not
+published to PyPI (see [PyPI](#pypi)). Installing into a virtual environment keeps the `repolens`
+command and its dependencies isolated from the rest of your system:
+
+```bash
+python3 -m venv ~/.venvs/repolens
+source ~/.venvs/repolens/bin/activate          # Windows: ~\.venvs\repolens\Scripts\activate
+
+pip install "git+https://github.com/CalebPiusC/RepoLens.git"
+```
+
+That installs RepoLens and registers the `repolens` command. No clone or checkout is involved,
+and the installed command can scan any project directory on your machine. The URL installs the
+current default branch, so pin a commit when you need a reproducible setup:
+
+```bash
+pip install "git+https://github.com/CalebPiusC/RepoLens.git@<commit-sha>"
+```
+
+To add the optional Ruff and Bandit analyzers at the same time, install the `tools` extra:
+
+```bash
+pip install "repolens[tools] @ git+https://github.com/CalebPiusC/RepoLens.git"
+```
+
+Ruff and Bandit are optional: RepoLens scans without them, reports missing tools as `unavailable`
+analyzers instead of failing, and needs no network access. Biome (JavaScript/TypeScript) is a
+separate npm package. See [Optional external tools](#optional-external-tools).
+
+### Installing from a clone
+
+Cloning is only necessary when you want the source itself, for example to run the test suite.
+Create and activate the environment first, then install the checkout:
 
 ```bash
 git clone https://github.com/CalebPiusC/RepoLens.git
 cd RepoLens
-python3 -m venv .venv
-source .venv/bin/activate
 
-pip install .              # installs RepoLens and the `repolens` command
-pip install -e ".[dev]"    # editable install with lint/test tooling
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+pip install .                      # installs RepoLens and the `repolens` command
 ```
 
-RepoLens is not yet published to PyPI; install it from the repository (add `.[tools]` to pull
-in Ruff and Bandit). Every invocation can also be run without the console script via
-`python -m repolens`.
+### PyPI
+
+The `repolens` distribution is not published to PyPI, so `pip install repolens` fails:
+
+```text
+ERROR: Could not find a version that satisfies the requirement repolens (from versions: none)
+ERROR: No matching distribution found for repolens
+```
+
+Similarly named packages on PyPI are unrelated projects and do not provide this `repolens`
+command. Install from the GitHub URL above instead.
+
+### Development installation
+
+Contributors install the checkout in editable mode together with the test and lint tooling. This
+is separate from the user installation above; the full setup, including the exact commands CI
+runs, is in the [contributing guide](docs/contributing/README.md).
+
+```bash
+pip install -e ".[dev]"    # editable install: pytest, pytest-cov, mypy, ruff, bandit
+```
+
+Every command in this README also works without the console script entry point — as
+`python -m repolens scan .` — provided it runs in the environment where RepoLens is installed.
+
+## Quick start
+
+```bash
+cd ~/projects/my-app        # any project directory; RepoLens never modifies it
+repolens scan .             # human-readable terminal report
+```
+
+| Task | Command |
+| --- | --- |
+| Terminal report (default) | `repolens scan .` |
+| Machine-readable JSON on stdout | `repolens scan . --format json` |
+| Standalone HTML on stdout | `repolens scan . --format html > report.html` |
+| HTML written to a specific file | `repolens scan . --format html --output report.html` |
+| View the HTML report | `start report.html` (Windows) · `open report.html` (macOS) · `xdg-open report.html` (Linux) |
+| Only fail on high or critical findings | `repolens scan . --min-severity high` |
+| List every scan option | `repolens scan --help` |
+| List commands and exit codes | `repolens --help` |
+
+The exit code is the result: `0` clean, `1` findings at or above the threshold, `2` invalid
+arguments or an unusable path (nothing was scanned), `3` the scan could not be completed, and
+`130` interrupted. Only `0` means "clean". See [Exit codes](#exit-codes) for the full policy.
+
+Two reporting limits are worth knowing before you trust a clean result:
+
+- `--max-findings N` (default `50`) truncates only the terminal table and its `Details` blocks.
+  The `--format json` and `--format html` documents always contain every finding.
+- An optional analyzer whose tool is not installed is reported as `unavailable` and does not
+  change the exit code, so a clean scan can still mean "Ruff and Bandit did not run". The
+  analyzer section names them; [Optional external tools](#optional-external-tools) explains how
+  to add them.
 
 ## Command-Line Usage
 
@@ -247,7 +331,11 @@ source, which is why they make the scan incomplete.
 Typical CI usage:
 
 ```bash
-pip install ".[tools]"          # or: pip install ruff bandit
+# install RepoLens with the optional Python analyzers (no clone required)
+pip install "repolens[tools] @ git+https://github.com/CalebPiusC/RepoLens.git"
+# in a checkout, the equivalent is: pip install ".[tools]"
+# already have RepoLens? add the tools directly: pip install ruff bandit
+
 repolens scan . --min-severity medium
 ```
 
@@ -672,19 +760,34 @@ link is replaced by a real file instead of being followed, and the new file gets
 file. An existing report at the destination is overwritten. `--color` does not apply to HTML
 output.
 
+#### Viewing the report
+
+The report is a single self-contained file, so open it like any other local HTML page:
+double-click it, or run `start report.html` on Windows, `open report.html` on macOS, or
+`xdg-open report.html` on Linux. No web server, network connection, or JavaScript is needed, and
+the file can be moved, attached to a ticket, or published as a CI artifact unchanged.
+
+`--output` resolves its path relative to the directory you run the command in, not the directory
+being scanned. Redirecting stdout instead (`--format html > report.html`) produces the same file
+when you only need it on disk. Either way the scan's exit code is unaffected.
+
 ## Optional external tools
 
 RepoLens never installs tools for you and never installs anything from the scanned repository. Install these once on the machine that runs the scan if you want the corresponding analyzer:
 
 ```bash
-# Python lint + security checks (already included in the `dev` extra)
-pip install "repolens[tools]"          # Bandit + Ruff
-# or explicitly:
+# Python lint + security checks: reinstall RepoLens with the `tools` extra
+pip install "repolens[tools] @ git+https://github.com/CalebPiusC/RepoLens.git"
+# or add the tools to an existing installation:
 pip install bandit ruff
 
 # JavaScript/TypeScript lint checks (Node.js required)
 npm install --global @biomejs/biome
 ```
+
+Tools are discovered on `PATH`, so activate the environment RepoLens and the tools share before
+scanning; a tool installed in an inactive virtual environment is reported as `unavailable` (see
+[Troubleshooting](#troubleshooting)).
 
 Availability is detected with a sanitized `PATH`. Missing tools are reported as `unavailable` analyzer outcomes and never abort the scan:
 
@@ -866,6 +969,99 @@ Two Windows environment capabilities are handled by skipping, never by weakening
 - Tests for the 64-level `<MAX_DIRECTORY_DEPTH>` limit nest single-character directories under a short scratch root, and skip if the filesystem still refuses. Windows enforces a ~260 character path limit unless long paths are enabled, which a deep tree below pytest's own temporary directory would exceed.
 
 Directory-permission tests are skipped on platforms that do not enforce `chmod` (Windows).
+
+## Troubleshooting
+
+### The `repolens` command is not recognized
+
+`repolens` is installed into the environment you installed RepoLens into, so it is only on
+`PATH` while that environment is active. Activate it and retry:
+
+```bash
+source ~/.venvs/repolens/bin/activate      # Windows: ~\.venvs\repolens\Scripts\activate
+repolens --version
+```
+
+Without activation, call that environment's interpreter directly; this works in any shell:
+
+```bash
+~/.venvs/repolens/bin/python -m repolens scan .
+# Windows: ~\.venvs\repolens\Scripts\python.exe -m repolens scan .
+```
+
+If you installed from a clone, the environment is the `.venv` you created there, so activate it
+from that directory. If activation succeeds but the command still fails, confirm which
+environment is actually active with `python -V` and `python -m pip show repolens`.
+
+### Ruff or Bandit is reported as `unavailable` even though it is installed
+
+Analyzer tools are discovered on `PATH`. A tool installed inside a virtual environment that is
+not active is invisible to RepoLens, which reports it as `unavailable` rather than failing:
+
+```text
+# Python-only project, Ruff and Bandit installed in an inactive environment
+Analyzers — 4 completed · 2 skipped · 2 unavailable
+
+# the same scan with that environment activated
+Analyzers — 6 completed · 2 skipped
+```
+
+Activate the environment that contains both RepoLens and the tools before scanning. A missing
+tool never fails a scan and never changes the exit code.
+
+### Python or pip is not available
+
+`python3 --version` and `python3 -m pip --version` should both succeed. Install Python 3.11 or
+later from [python.org](https://www.python.org/downloads/) or from your system package manager;
+pip ships with it. On Windows the `py` launcher selects an interpreter:
+`py -3.12 -m pip --version`. On Debian/Ubuntu, a minimal installation may need the
+`python3-venv` and `python3-pip` packages before `python3 -m venv` works.
+
+### Installation fails because of the Python version
+
+RepoLens declares `Requires-Python: >=3.11`, so pip refuses to install it on older interpreters.
+Check the interpreter that created the environment:
+
+```bash
+python3 -V        # must be 3.11 or newer
+```
+
+When the default interpreter is too old, create the environment with an explicit one, for example
+`python3.12 -m venv ~/.venvs/repolens`. CI runs the full suite on Python 3.11, 3.12, and 3.13.
+
+### The scan reports findings from unrelated code
+
+`repolens scan .` scans the **current** directory. Running it from your home directory, `/tmp`, or
+a repository's parent therefore scans everything underneath — dependencies, virtual
+environments, and vendored code included — and reports findings that have nothing to do with your
+project. Change into the project first:
+
+```bash
+cd ~/projects/my-app
+repolens scan .
+```
+
+Running it inside the RepoLens checkout scans RepoLens itself. A path that does not exist, or
+that is a file rather than a directory, is rejected before any analyzer runs and exits `2`:
+
+```text
+repolens: error: Repository path does not exist: /path/to/typo
+repolens: error: Repository path is not a directory: README.md
+```
+
+### Characters look escaped in Windows output
+
+When Windows redirects output to a file or a pipe, characters the console code page cannot
+represent are written as `\xNN`/`\uNNNN` escapes rather than crashing the report. Use
+`--format html --output report.html` for a file that is always UTF-8. See
+[Output encoding](#output-encoding).
+
+### A CI job fails with exit code 3 but reports no findings
+
+Exit code `3` means the scan could not be completed — an analyzer failed or timed out, or
+discovery could not read part of the repository — so the result is not a clean one. The
+`Coverage:` line names the reason and the analyzer section identifies the check. See
+[Partial scans and false-clean protection](#partial-scans-and-false-clean-protection).
 
 ## Documentation
 

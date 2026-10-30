@@ -236,3 +236,32 @@ def test_select_source_files_with_status_reports_the_limit(tmp_path: Path) -> No
 
     # The backwards-compatible wrapper keeps the same selection.
     assert select_source_files(context, frozenset({".py"}), limit=2) == capped
+
+
+def test_probe_tool_returns_an_absolute_path_for_a_relative_path_entry(
+    install_fake_tool: Callable[..., Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative `PATH` entry must not yield a relative executable path.
+
+    `shutil.which` returns the relative path verbatim when the matching `PATH` entry is
+    relative. Tools are then executed from a different working directory, where that relative
+    path no longer resolves, so probing must anchor the path while the current directory is
+    still the one `PATH` was interpreted against.
+
+    The scan runs from a directory whose contents are addressed relatively, which is what makes
+    the anchoring observable; `os.path.relpath` is avoided because a Windows CI checkout and its
+    temporary directory can sit on different drives, where it raises `ValueError`.
+    """
+    install_fake_tool("relative-tool", "pass\n", version="2.4.6")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", os.pathsep.join(["fake-bin", os.environ.get("PATH", "")]))
+    clear_tool_cache()
+
+    availability = probe_tool("relative-tool")
+
+    assert availability.available is True
+    assert availability.executable is not None
+    assert Path(availability.executable).is_absolute()
+    assert Path(availability.executable).is_file()
+    # Anchoring must not lose the version probe, which also runs from a different directory.
+    assert availability.version == "2.4.6"
