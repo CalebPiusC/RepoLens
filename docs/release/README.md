@@ -1,88 +1,144 @@
-# First PyPI release readiness
+# First PyPI release
 
-This is a preparation checklist, **not a publishing workflow or authorization to release**.
-There are no RepoLens tags, GitHub releases, or PyPI uploads. The preparation revision is
-`0.1.1.dev1`; the intended first stable package version is `0.1.1`. The JSON schema remains
-`1.1.0` and is not derived from the package version. See the [draft notes](../changelog/README.md).
+The tag-only [publishing workflow](../../.github/workflows/publish.yml) is release infrastructure,
+not authorization to publish. The current source remains `0.1.1.dev1`; it is rejected by the
+workflow. The intended first final version is `0.1.1`. The JSON schema remains `1.1.0` and is
+versioned separately. See the [draft changelog](../changelog/README.md).
 
-## Blockers and decisions checked on 2026-10-31
+## Owner-side setup required before a release
 
-- The PyPI JSON and simple-index endpoints for `repolens` returned 404 during preparation on
-  2026-10-31. This is not a reservation or a guarantee of availability; the name may be taken
-  before release. No PyPI or TestPyPI account-side publisher configuration was verified.
-- There is no publishing workflow or GitHub environment in the repository. Main-branch protection
-  settings could not be read with the available integration. The owner must verify required
-  reviews and checks, and restrict release-tag creation or modification.
-- GitHub private vulnerability reporting is disabled, and no other private contact is documented.
-  The owner must enable it or add an authorized private reporting channel before release.
-- The installation matrix builds and tests artifacts on each runner and also installs the same
-  hash-verified CI build on Linux and Windows. It does **not** promote those artifacts to PyPI and
-  is not a release provenance system.
-- `0.1.1.dev0` was already downloadable from source and must not be published. This revision
-  advances to `0.1.1.dev1`, also unpublished; `0.1.1` is reserved for a separately approved
-  stable release. Do not replace published artifacts or reuse a published version.
+These settings are controlled by the repository and PyPI owners, not by this workflow:
 
-## Before creating an actual release
+1. **Protect `main` and release tags.** Require the existing quality and installation checks and
+   human review before merging release changes. During this review the `Protect main` ruleset was
+   active and required a PR approval, but its required-status-check list was empty. The `Protect
+   releases` ruleset for `v*` tags was disabled. Enable and verify appropriate tag creation,
+   update, deletion, and bypass restrictions before allowing publication.
+2. **Protect the `pypi` environment.** It already exists with a required reviewer and self-review
+   prevention, but no deployment branch/tag restriction was configured during this review. Limit
+   deployment to the intended protected `v*` tags. Ensure an authorized reviewer distinct from
+   the tag-pushing actor can approve: self-review is disabled and only one reviewer was listed.
+   Review any administrator bypass permissions. Keep private vulnerability reporting enabled or
+   document another authorized private channel.
+3. **Configure PyPI Trusted Publishing.** Once this workflow is merged and the protections are
+   verified, an authorized PyPI account owner should register a
+   [pending publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
+   for project `repolens`, owner `CalebPiusC`, repository `RepoLens`, workflow filename
+   `publish.yml`, and environment `pypi`. The environment name is essential: the separate build
+   job requests an OIDC token for GitHub provenance but must not be trusted to publish to PyPI.
+   Do not configure a second publisher that omits the environment constraint. No long-lived PyPI
+   token or password is needed in repository or environment secrets.
 
-1. Complete human review, merge the preparation work only with separate approval, and require the
-   existing quality and Linux/Windows installation checks on protected `main`. Address failures,
-   the private-reporting blocker, and any newly discovered release-critical issues first. CI is
-   evidence for the tested revisions and platforms, not a substitute for review or a security audit.
-2. In a reviewed future release change, set the sole package version in
-   `src/repolens/_version.py` to `0.1.1`; preserve the independently versioned schema `1.1.0`.
-   Update the CLI version example and make the packaged README's PyPI instructions truthful both
-   before and after publication: remove time-dependent "not published"/"currently fails" claims
-   and describe how to install **an available** release without claiming one already exists.
-   Update the tests that currently enforce the pending-PyPI wording. Do not mark these draft notes
-   as released or announce a release before publication actually succeeds.
-3. Have the repository owner set up a reviewed, protected GitHub environment named `pypi` with
-   required human approval, and restrict release tags using repository rules. The proposed future
-   workflow filename is `.github/workflows/publish.yml`; it does not exist yet. After the workflow
-   and environment are approved, an authorized PyPI account owner can configure a
-   [pending trusted publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
-   for project `repolens`, owner `CalebPiusC`, repository `RepoLens`, workflow `publish.yml`, and
-   environment `pypi`. Recheck the normalized name and ownership immediately before release: a
-   pending publisher does not reserve a new project name.
-4. Only after separate authorization, create the protected `v0.1.1` tag on the reviewed release
-   commit and run the approved release workflow. Verify the artifact versions, tag and commit,
-   checks, approvals, and destination before uploading. A tag, GitHub release, PyPI publication,
-   and announcement are distinct actions; none is automatic or implied by this checklist.
+The PyPI project endpoints returned 404 during review on 2026-10-31, but that does not reserve the
+name or prove it was never previously used. Account-side publisher configuration was not verified.
+Recheck the normalized name, ownership, and release records immediately before release.
+TestPyPI, if separately authorized later, needs its own account, project, publisher, environment,
+audience, and destination; this workflow publishes only to production PyPI.
 
-## Recommended minimal workflow, to be implemented and reviewed later
+## How the workflow protects a release
 
-Use a manually dispatched workflow tied to a protected version tag; do not publish on pushes or
-pull requests. Require its checked-out tag to resolve to a commit reachable from protected `main`,
-and reject arbitrary branches. Check that the exact `v<version>` tag matches the single source
-version and both distributions' metadata, that the version is a final PEP 440 release (no dev,
-pre-release, or local suffix for production), and that the intended version is `0.1.1` for this
-first release. Check existing versions through PyPI and the owner's release records: stop on an
-existing or uncertain version, a network error, or an unexpected response. A 404 alone does not
-prove a previously deleted version was never used. Never use `--skip-existing` to hide a partial
-or duplicate upload; PyPI's filename immutability is a final safeguard, not a replacement for
-this check.
+Only a push of a `v*` tag can start the workflow; branch pushes and pull requests cannot publish.
+Both jobs require the upstream repository, a tag-push event, and a tag still resolving to the event
+commit. The checked-out commit must be reachable from `origin/main`. The tag must exactly match
+`v<version>`, where the static package version is a canonical final `N.N.N` version: development,
+pre-release, post-release, and local versions are rejected. Tag restrictions and `main` protection
+are still necessary: someone who can change the tagged workflow or bypass environment approval
+can bypass checks in that workflow.
 
-Build one canonical wheel and sdist from the clean tagged commit. Run strict metadata checks,
-archive allowlist/secret review, and the existing quality and installation tests against **those
-same artifacts**, including Linux and Windows. An optional second build can verify reproducibility,
-but must not become a second release candidate. Store the canonical files and their SHA-256
-manifest as an immutable workflow artifact; use the artifact ID for handoff, recheck the digests
-before upload, and publish exactly those files without rebuilding. Pin third-party actions to
-reviewed full commit SHAs, minimize job permissions, and do not expose publication credentials to
-build or test jobs.
+The build job checks the README's pending-PyPI text and version example, fails closed if PyPI's
+version endpoint is not a direct 404, and creates one canonical wheel and sdist. It runs
+`twine check --strict`, verifies archive allowlists, metadata, source bytes and wheel RECORD hashes,
+and exercises fresh installs of both distributions with the existing lifecycle checks. It records
+their SHA-256 hashes, generates GitHub build-provenance attestations, verifies the files again, and
+uploads them as one internal workflow artifact. These are not PyPI uploads.
 
-Use [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/using-a-publisher/) with
-short-lived OIDC credentials, not a long-lived API token. Only the protected publish job needs
-`id-token: write` for PyPI; approval must gate that job, which should only download and verify the
-chosen artifacts and invoke the pinned official PyPA publishing action. Register the exact
-workflow and `pypi` environment with PyPI. If adding GitHub build-provenance attestation in a
-separate build job, grant only the permissions that action requires, including `id-token: write`
-and `attestations: write`; keep that job outside the PyPI-trusted environment and verify its
-subject digests and source commit. The PyPA action's default
-[PyPI Publish attestation](https://docs.pypi.org/attestations/producing-attestations/) identifies
-the publisher and artifact digest; it is **not** SLSA build provenance and does not by itself
-prove how the files were built. Neither attestation alone proves a hermetic build or a security
-audit.
+After the `pypi` environment is approved, the publish job checks the tag and main ancestry again,
+downloads that artifact by ID, verifies the exact two filenames and hashes, and checks PyPI again
+immediately before publishing those same files. It never rebuilds. Runs are serialized and
+`skip-existing` is disabled. A 404 cannot prove a deleted version was never used, and the check is
+not atomic with an outside publisher; review the owner's release history. PyPI's immutable
+filenames provide an additional safeguard, not a substitute for that review.
 
-A separately authorized TestPyPI rehearsal, if desired, needs its own account, project-name check,
-pending publisher, protected environment, and TestPyPI audience/destination. It must not reuse or
-fall back to production credentials. No TestPyPI or PyPI upload is performed by this checklist.
+The build job's `id-token: write` and `attestations: write` permissions are for GitHub build
+provenance and are outside the PyPI-trusted environment. Only the protected publish job receives an
+OIDC token usable by its exactly configured PyPI publisher. The PyPA action also generates
+[PyPI Publish attestations](https://docs.pypi.org/attestations/producing-attestations/) for the
+uploaded files. They identify the publisher and file digests; they are **not** the GitHub build
+provenance attestation. Neither proves a hermetic build or a security audit.
+
+## Preparing and approving the first release
+
+Perform these steps only after separate release approval:
+
+1. In a reviewed release change, set `src/repolens/_version.py` to `0.1.1`. Update the CLI version
+   example and replace the README's pending-PyPI claims with wording that is accurate both before
+   and after upload, such as how to install **an available** release; do not claim it is already
+   published. Update the tests enforcing pending-PyPI wording and any affected security/version
+   documentation. Keep schema `1.1.0`. Do not mark the changelog as released before publication.
+2. Run all quality checks, the Linux/Windows installation matrix, and artifact inspection on that
+   change. Merge only after the owner-required approvals and checks pass. Confirm that the release
+   commit is on protected `main`, the version has never been published, and the owner-side setup
+   above is complete.
+3. An authorized tag creator can create and push the immutable tag on that reviewed commit:
+
+   ```sh
+   git fetch --no-tags origin main
+   # Replace with the reviewed release commit, verified reachable from origin/main.
+   RELEASE_COMMIT=<full-release-commit-sha>
+   git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+   git tag -a v0.1.1 "$RELEASE_COMMIT" -m "RepoLens 0.1.1"
+   git push origin refs/tags/v0.1.1
+   ```
+
+   Pushing the tag starts the workflow. Do not create a tag, GitHub release, or publication until
+   explicitly authorized; these are separate actions.
+4. Inspect the build job, the exact candidate hashes, its provenance, and the existing CI results.
+   A different authorized reviewer then approves the pending **pypi** deployment in the GitHub
+   Actions run. Approval releases the publish job; it does not create a GitHub release.
+
+## Verify after an authorized publication
+
+Only after the workflow reports successful publication, check the PyPI project and files, compare
+both SHA-256 hashes with the workflow, and install the exact version in a fresh environment:
+
+```sh
+python -m venv /tmp/repolens-release-verify
+. /tmp/repolens-release-verify/bin/activate
+python -m pip install 'repolens==0.1.1'
+python -m pip check
+repolens --version
+repolens --help
+# Run `repolens scan .` in a separate test project, not the virtual environment.
+```
+
+Download both files from PyPI, compare their hashes with the workflow, and use a current GitHub
+CLI to verify each file's GitHub build provenance against the repository, workflow, and tag:
+
+```sh
+mkdir -p /tmp/repolens-published
+python -m pip download --no-deps --only-binary=:all: 'repolens==0.1.1' -d /tmp/repolens-published
+python -m pip download --no-deps --no-binary=:all: 'repolens==0.1.1' -d /tmp/repolens-published
+cd /tmp/repolens-published
+sha256sum repolens-0.1.1-py3-none-any.whl repolens-0.1.1.tar.gz
+gh attestation verify repolens-0.1.1-py3-none-any.whl \
+  --repo CalebPiusC/RepoLens \
+  --signer-workflow CalebPiusC/RepoLens/.github/workflows/publish.yml \
+  --source-ref refs/tags/v0.1.1
+```
+
+Repeat for `repolens-0.1.1.tar.gz` and inspect the corresponding PyPI Publish attestations separately.
+These checks do not assert that PyPI's publish attestation itself is build provenance.
+
+## Failure and recovery
+
+- If validation, provenance, approval, or a transient service fails **before any file is uploaded**,
+  inspect the run and PyPI/release history. Fix account settings or transient problems, then rerun
+  only after confirming no file for that version exists. If source changes are needed, use a new
+  reviewed commit and version/tag rather than moving or reusing a protected tag.
+- If one file was uploaded or the version already exists, stop: this workflow intentionally
+  refuses to continue or skip existing files. The PyPI owner should inspect the partial release,
+  coordinate any yanking, and choose a new version after review. Deleting a file does not make its
+  filename reusable. Do not try to replace artifacts or silently complete a partial upload.
+- If Trusted Publishing fails, verify the exact PyPI owner/repository/workflow/environment tuple,
+  environment approval and tag restrictions, and PyPI's project-name ownership before retrying.
+  Do not add a long-lived token as a workaround.

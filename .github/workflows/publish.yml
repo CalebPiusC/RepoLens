@@ -1,0 +1,157 @@
+name: Publish to PyPI
+
+# A tag alone can build, but publication requires the protected pypi environment.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+# Do not run competing publication attempts; PyPI's availability check is not atomic.
+concurrency:
+  group: pypi-release
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONOPTIMIZE: '0'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_NO_INPUT: '1'
+  SOURCE_DATE_EPOCH: '1735689600'
+
+jobs:
+  build:
+    name: Verify and build release distributions
+    if: ${{ github.repository == 'CalebPiusC/RepoLens' && github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # GitHub build-provenance attestation, not PyPI publication
+      attestations: write # Store GitHub build-provenance attestations
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      wheel_sha256: ${{ steps.hashes.outputs.wheel }}
+      sdist_sha256: ${{ steps.hashes.outputs.sdist }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.11'
+
+      - name: Validate tag, source, README, and PyPI availability
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/installation/release_checks.py ref
+          version=$(python tests/installation/release_checks.py version "$GITHUB_REF_NAME")
+          python tests/installation/release_checks.py readme "$version"
+          python tests/installation/release_checks.py pypi "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install build validators
+        run: python -m pip install 'build==1.6.1' 'twine==7.0.0'
+
+      - name: Build the release candidate once
+        run: python -m build --outdir dist
+
+      - name: Validate metadata, contents, and installed distributions
+        run: |
+          python -m twine check --strict dist/*
+          python tests/installation/check_artifacts.py check-release dist
+          python tests/installation/lifecycle.py wheel --directory dist
+
+      - name: Record release-candidate hashes
+        id: hashes
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          wheel=$(sha256sum "dist/repolens-${RELEASE_VERSION}-py3-none-any.whl" | cut -d' ' -f1)
+          sdist=$(sha256sum "dist/repolens-${RELEASE_VERSION}.tar.gz" | cut -d' ' -f1)
+          printf 'wheel=%s\nsdist=%s\n' "$wheel" "$sdist" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance for both distributions
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+      - name: Verify the attested candidate has not changed
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          REPOLENS_WHEEL_SHA256: ${{ steps.hashes.outputs.wheel }}
+          REPOLENS_SDIST_SHA256: ${{ steps.hashes.outputs.sdist }}
+        run: python tests/installation/release_checks.py artifacts dist "$RELEASE_VERSION"
+
+      - name: Store the exact candidate for the protected job
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: repolens-release-candidate
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish verified distributions to PyPI
+    needs: build
+    if: ${{ github.repository == 'CalebPiusC/RepoLens' && github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/repolens
+    permissions:
+      contents: read
+      id-token: write # Short-lived PyPI Trusted Publishing credential
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the candidate artifact ID
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+        run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+
+      - name: Download the exact candidate by artifact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: dist/
+          merge-multiple: true
+
+      - name: Recheck the tag, hashes, and PyPI version after approval
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          REPOLENS_WHEEL_SHA256: ${{ needs.build.outputs.wheel_sha256 }}
+          REPOLENS_SDIST_SHA256: ${{ needs.build.outputs.sdist_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 tests/installation/release_checks.py ref
+          version=$(python3 tests/installation/release_checks.py version "$GITHUB_REF_NAME")
+          test "$version" = "$RELEASE_VERSION"
+          python3 tests/installation/release_checks.py artifacts dist "$version"
+          python3 tests/installation/release_checks.py pypi "$version"
+
+      - name: Publish to PyPI with OIDC and PyPI Publish attestations
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/
+          attestations: true
+          skip-existing: false
