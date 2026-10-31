@@ -10,12 +10,11 @@ import argparse
 import ast
 import hashlib
 import hmac
+import http.client
 import os
 import re
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -131,22 +130,28 @@ def verify_distributions(directory: Path, version: str, wheel_hash: str, sdist_h
 
 
 def require_unpublished(version: str) -> None:
-    """Abort on an existing version or any uncertain PyPI response."""
+    """Abort on an existing version or any uncertain PyPI response; never follow redirects."""
     require_final_version(version)
-    url = f"https://pypi.org/pypi/repolens/{version}/json"
-    request = urllib.request.Request(url, headers={"User-Agent": "RepoLens-release-check/1.0"})
+    connection = http.client.HTTPSConnection("pypi.org", timeout=15)
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
-            raise RuntimeError(f"PyPI returned HTTP {response.status}; version may already exist")
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404 and exc.url == url:
-            print(f"PyPI version {version} is not currently visible (HTTP 404).")
-            return
-        raise RuntimeError(f"Unexpected PyPI HTTP {exc.code}; refusing publication") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        connection.request(
+            "GET",
+            f"/pypi/repolens/{version}/json",
+            headers={"User-Agent": "RepoLens-release-check/1.0"},
+        )
+        status = connection.getresponse().status
+    except (http.client.HTTPException, OSError) as exc:
         raise RuntimeError(
             "Could not verify PyPI version availability; refusing publication"
         ) from exc
+    finally:
+        connection.close()
+    if status == 404:
+        print(f"PyPI version {version} is not currently visible (HTTP 404).")
+    elif status == 200:
+        raise RuntimeError("PyPI version already exists; refusing publication")
+    else:
+        raise RuntimeError(f"Unexpected PyPI HTTP {status}; refusing publication")
 
 
 def main() -> None:

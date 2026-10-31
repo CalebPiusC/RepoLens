@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import importlib.util
-import urllib.error
-import urllib.request
-from contextlib import nullcontext
-from email.message import Message
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -149,51 +145,43 @@ def test_artifact_handoff_rejects_tampering_or_extra_files(tmp_path: Path) -> No
         release.verify_distributions(tmp_path, "0.1.1", wheel_hash, sdist_hash)
 
 
+def _pypi_connection(monkeypatch: pytest.MonkeyPatch, status: int) -> tuple[Mock, Mock]:
+    connection = Mock()
+    connection.getresponse.return_value.status = status
+    factory = Mock(return_value=connection)
+    monkeypatch.setattr(http.client, "HTTPSConnection", factory)
+    return factory, connection
+
+
 def test_pypi_guard_allows_only_direct_404(monkeypatch: pytest.MonkeyPatch) -> None:
-    url = "https://pypi.org/pypi/repolens/0.1.1/json"
-
-    def absent(request: urllib.request.Request, *, timeout: int) -> Any:
-        assert request.full_url == url
-        assert timeout == 15
-        raise urllib.error.HTTPError(url, 404, "not found", Message(), None)
-
-    monkeypatch.setattr(urllib.request, "urlopen", absent)
+    factory, connection = _pypi_connection(monkeypatch, 404)
     release.require_unpublished("0.1.1")
+    factory.assert_called_once_with("pypi.org", timeout=15)
+    connection.request.assert_called_once_with(
+        "GET",
+        "/pypi/repolens/0.1.1/json",
+        headers={"User-Agent": "RepoLens-release-check/1.0"},
+    )
+    connection.close.assert_called_once_with()
 
-    def redirected(_request: urllib.request.Request, *, timeout: int) -> Any:
-        raise urllib.error.HTTPError("https://example.com/", 404, "not found", Message(), None)
 
-    monkeypatch.setattr(urllib.request, "urlopen", redirected)
-    with pytest.raises(RuntimeError, match="Unexpected PyPI HTTP 404"):
-        release.require_unpublished("0.1.1")
-
-
-@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
-def test_pypi_guard_rejects_unexpected_http_errors(
+@pytest.mark.parametrize("status", [300, 301, 302, 307, 308, 401, 403, 429, 500, 503])
+def test_pypi_guard_rejects_redirects_and_unexpected_http_responses(
     monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
-    def http_error(request: urllib.request.Request, *, timeout: int) -> Any:
-        raise urllib.error.HTTPError(request.full_url, status, "error", Message(), None)
-
-    monkeypatch.setattr(urllib.request, "urlopen", http_error)
+    _, connection = _pypi_connection(monkeypatch, status)
     with pytest.raises(RuntimeError, match="Unexpected PyPI HTTP"):
         release.require_unpublished("0.1.1")
+    connection.request.assert_called_once()
+    connection.close.assert_called_once_with()
 
 
 def test_pypi_guard_rejects_existing_version_and_network_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
-        lambda *_args, **_kwargs: nullcontext(SimpleNamespace(status=200)),
-    )
-    with pytest.raises(RuntimeError, match="may already exist"):
+    _, connection = _pypi_connection(monkeypatch, 200)
+    with pytest.raises(RuntimeError, match="already exists"):
         release.require_unpublished("0.1.1")
-
-    def offline(*_args: object, **_kwargs: object) -> Any:
-        raise urllib.error.URLError("offline")
-
-    monkeypatch.setattr(urllib.request, "urlopen", offline)
+    connection.request.side_effect = OSError("offline")
     with pytest.raises(RuntimeError, match="Could not verify"):
         release.require_unpublished("0.1.1")
