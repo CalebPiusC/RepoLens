@@ -2,15 +2,19 @@
 
 The optional ``seed`` command creates obviously fake local files in a disposable CI
 checkout to verify the build allowlist. ``check`` inspects two independent builds and
-a direct wheel. ``verify-canonical`` checks the workflow artifact against the build job's
-hashes before each operating system installs it; it does not publish anything.
+a direct wheel; ``check-release`` inspects one release-candidate build without rebuilding it.
+``verify-canonical`` checks the installation workflow artifact against the build job's hashes.
+These commands do not publish anything.
 """
 
 from __future__ import annotations
 
+import base64
 import configparser
 import contextlib
+import csv
 import hashlib
+import io
 import os
 import re
 import runpy
@@ -114,7 +118,27 @@ def _metadata_assertions(raw: bytes, version: str) -> None:
     assert {Requirement(item) for item in metadata.get_all("Requires-Dist", [])} == expected
 
 
-def check(first: Path, second: Path, direct: Path) -> None:
+def _check_wheel_record(archive: zipfile.ZipFile, names: list[str], record: str) -> None:
+    """Check each wheel member against its RECORD digest and size."""
+    rows = list(csv.reader(io.StringIO(archive.read(record).decode("utf-8"))))
+    assert all(len(row) == 3 for row in rows), "malformed wheel RECORD"
+    assert len(rows) == len(names), "wrong number of RECORD entries"
+    assert {row[0] for row in rows} == set(names), "duplicate or missing RECORD entries"
+    for name, digest, size in rows:
+        if name == record:
+            assert not digest, "RECORD must not hash itself"
+            assert not size, "RECORD must not record its own size"
+            continue
+        content = archive.read(name)
+        expected = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=")
+        assert digest == f"sha256={expected.decode('ascii')}", name
+        assert size == str(len(content)), name
+
+
+def check(first: Path, second: Path | None = None, direct: Path | None = None) -> None:
+    """Inspect one candidate or compare the existing independent CI builds as well."""
+    if (second is None) != (direct is None):
+        raise ValueError("Reproducibility checks require both a second build and a direct wheel")
     version = cast(str, runpy.run_path(str(_ROOT / "src/repolens/_version.py"))["__version__"])
     expected_files = {
         p.relative_to(_ROOT / "src").as_posix()
@@ -126,11 +150,18 @@ def check(first: Path, second: Path, direct: Path) -> None:
 
     wheel = first / f"repolens-{version}-py3-none-any.whl"
     sdist = first / f"repolens-{version}.tar.gz"
+    assert set(first.iterdir()) == {wheel, sdist}, "unexpected or missing distribution files"
     for artifact in (wheel, sdist):
         assert artifact.is_file(), artifact
-        assert _digest(artifact) == _digest(second / artifact.name), artifact.name
-        print(f"reproducible sha256 {artifact.name}: {_digest(artifact)}")
-    assert _digest(wheel) == _digest(direct / wheel.name), "direct wheel differs from sdist wheel"
+        assert not artifact.is_symlink(), artifact
+        digest = _digest(artifact)
+        if second is not None:
+            assert digest == _digest(second / artifact.name), artifact.name
+        print(f"{'reproducible ' if second is not None else ''}sha256 {artifact.name}: {digest}")
+    if direct is not None:
+        assert _digest(wheel) == _digest(direct / wheel.name), (
+            "direct wheel differs from sdist wheel"
+        )
 
     distinfo = f"repolens-{version}.dist-info"
     expected_wheel = expected_files | {
@@ -144,6 +175,9 @@ def check(first: Path, second: Path, direct: Path) -> None:
         names = archive.namelist()
         assert len(names) == len(set(names)), "duplicate wheel members"
         assert set(names) == expected_wheel, set(names) ^ expected_wheel
+        _check_wheel_record(archive, names, f"{distinfo}/RECORD")
+        for name in expected_files:
+            assert archive.read(name) == (_ROOT / "src" / name).read_bytes(), name
         _metadata_assertions(archive.read(f"{distinfo}/METADATA"), version)
         assert archive.read(f"{distinfo}/licenses/LICENSE") == (_ROOT / "LICENSE").read_bytes()
         entry_points = configparser.ConfigParser()
@@ -166,6 +200,10 @@ def check(first: Path, second: Path, direct: Path) -> None:
             "PKG-INFO",
         }
         assert set(names) == expected_sdist, set(names) ^ expected_sdist
+        for name in expected_files:
+            content = archive.extractfile(f"{prefix}src/{name}")
+            assert content is not None
+            assert content.read() == (_ROOT / "src" / name).read_bytes(), name
         metadata_file = archive.extractfile(f"{prefix}PKG-INFO")
         assert metadata_file is not None
         _metadata_assertions(metadata_file.read(), version)
@@ -205,12 +243,14 @@ def main() -> None:
         clean()
     elif len(sys.argv) == 5 and sys.argv[1] == "check":
         check(*(Path(arg) for arg in sys.argv[2:]))
+    elif len(sys.argv) == 3 and sys.argv[1] == "check-release":
+        check(Path(sys.argv[2]))
     elif len(sys.argv) == 3 and sys.argv[1] == "verify-canonical":
         verify_canonical(Path(sys.argv[2]))
     else:
         raise SystemExit(
             "Usage: check_artifacts.py seed | clean | check FIRST SECOND DIRECT "
-            "| verify-canonical DIRECTORY"
+            "| check-release DIRECTORY | verify-canonical DIRECTORY"
         )
 
 

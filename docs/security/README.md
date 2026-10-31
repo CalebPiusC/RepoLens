@@ -156,7 +156,5 @@ vulnerability*, when private reporting is available there), including a descript
 steps, impact, and a suggested fix if you have one. Coordinated disclosure — keeping details
 private until a fix is available — is appreciated. This policy makes no response-time commitment.
 
-> Maintainer note: as of this writing, GitHub private vulnerability reporting is **not** enabled
-> on `CalebPiusC/RepoLens`, so the button above will not appear until the owner enables it
-> (Settings → Security → Private vulnerability reporting). Enabling it is the recommended way to
-> make these instructions actionable.
+> Maintainer note: private vulnerability reporting was verified enabled during the release
+> infrastructure review. Keep it enabled, or document another authorized private reporting channel.
