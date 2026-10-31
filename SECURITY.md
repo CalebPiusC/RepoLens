@@ -6,17 +6,16 @@ enforcement points, and known limits are documented in
 
 ## Reporting a vulnerability
 
-Please do **not** open a public GitHub issue for a vulnerability in RepoLens itself. Report it
-privately to the repository owner through GitHub — **Security** tab → *Report a vulnerability*,
-when private reporting is available there — with a description, reproduction steps, impact, and a
-suggested fix if you have one. Keeping details private until a fix is available is appreciated.
-No response-time commitment is made.
+Please do **not** open a public GitHub issue for a vulnerability in RepoLens itself. GitHub
+private vulnerability reporting is currently disabled, and no alternative private contact is
+documented yet. The repository owner must enable it (Settings → Security → Private vulnerability
+reporting), or document another authorized private reporting channel, before the first release.
 
-Maintainer note: private vulnerability reporting must be enabled by the owner
-(Settings → Security → Private vulnerability reporting) for the button above to appear; it was
-not enabled when this file was added.
+Once GitHub private reporting is enabled, use **Security** → *Report a vulnerability* with a
+description, reproduction steps, impact, and a suggested fix if you have one. Keeping details
+private until a fix is available is appreciated. No response-time commitment is made.
 
 ## Supported versions
 
-RepoLens is pre-release (`0.1.1.dev0` in development, no tagged releases). Security fixes land on
+RepoLens is pre-release (`0.1.1.dev1` in development, no tagged releases). Security fixes land on
 `main`; there are no maintained release branches yet.
