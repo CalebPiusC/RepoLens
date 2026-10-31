@@ -85,7 +85,8 @@ py -3 -m venv "$HOME\.venvs\repolens"
 & "$HOME\.venvs\repolens\Scripts\Activate.ps1"
 python -m pip install "https://github.com/CalebPiusC/RepoLens/archive/refs/heads/main.zip"
 python -m pip check
-Get-Command python, repolens | Select-Object -ExpandProperty Source
+Get-Command python -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+Get-Command repolens -CommandType Application | Select-Object -First 1 -ExpandProperty Source
 repolens --version
 
 Set-Location C:\path\to\your\project   # replace with your actual project path
@@ -1091,7 +1092,8 @@ In PowerShell:
 
 ```powershell
 & "$HOME\.venvs\repolens\Scripts\Activate.ps1"
-Get-Command python, repolens | Select-Object -ExpandProperty Source
+Get-Command python -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+Get-Command repolens -CommandType Application | Select-Object -First 1 -ExpandProperty Source
 python -m pip show repolens
 repolens --version
 ```

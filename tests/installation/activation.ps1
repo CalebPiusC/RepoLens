@@ -13,7 +13,7 @@ function Assert-NativeSuccess([string] $Operation) {
 function Assert-Launcher([string] $Venv, [string] $Version) {
     $launcher = Join-Path $Venv 'Scripts\repolens.exe'
     if (-not (Test-Path $launcher)) { throw "Missing launcher: $launcher" }
-    $resolved = (Get-Command repolens -CommandType Application).Source
+    $resolved = (Get-Command repolens -CommandType Application | Select-Object -First 1).Source
     if ($resolved -ne $launcher) { throw "PATH resolved $resolved, not $launcher" }
     $output = (& repolens --version).Trim()
     Assert-NativeSuccess 'repolens --version'
@@ -47,7 +47,7 @@ try {
     Assert-NativeSuccess 'create virtual environment'
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
     & (Join-Path $venv 'Scripts\Activate.ps1')
-    $python = (Get-Command python -CommandType Application).Source
+    $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
     if ($python -ne (Join-Path $venv 'Scripts\python.exe')) { throw "Unexpected Python: $python" }
 
     python -m pip install $env:REPOLENS_MAIN_URL
@@ -56,7 +56,8 @@ try {
     Assert-NativeSuccess 'pip check for main archive'
     $mainVersion = (python -c "import importlib.metadata as m; print(m.version('repolens'))").Trim()
     Assert-NativeSuccess 'read main package version'
-    Get-Command python, repolens | Select-Object -ExpandProperty Source
+    Get-Command python -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+    Get-Command repolens -CommandType Application | Select-Object -First 1 -ExpandProperty Source
     Assert-Launcher $venv $mainVersion
     Push-Location $project
     try {
