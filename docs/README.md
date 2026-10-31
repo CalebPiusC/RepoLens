@@ -16,7 +16,8 @@ behavior.
 | [Contributing Guide](./contributing/README.md) | Development setup with `pip`, quality gates that match CI, how to write an analyzer, and the pull-request process. |
 | [Security Model](./security/README.md) | Threat model, discovery and subprocess safety, secret redaction, OSV.dev data minimization, and how to report a vulnerability in RepoLens itself. |
 | [Rules Reference](./rules/README.md) | Every rule ID RepoLens can emit, with category, severity, and trigger, plus fingerprint and threshold semantics. |
-| [Changelog](./changelog/README.md) | Unreleased changes, in Keep a Changelog format. RepoLens has no tagged release yet. |
+| [Changelog](./changelog/README.md) | Draft first-release scope and changes since the last development baseline. RepoLens has no tagged release yet. |
+| [Release readiness](./release/README.md) | Remaining first-release blockers, account setup, and a proposed Trusted Publishing design. |
 
 See also the [analyzers package notes](../src/repolens/analyzers/README.md) and the
 [test suite guide](../tests/README.md).

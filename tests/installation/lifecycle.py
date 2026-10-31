@@ -26,6 +26,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _BASE_REPO = "CalebPiusC/RepoLens"
 _OLD_COMMIT = "e2d832764eb521c17a8f3ac6ed0906420a114ac3"
 _BASE_COMMIT = "f4c0f46c475135f9116afb6469b216cb4ebf02bd"
+_DEV0_COMMIT = "2305fd975c9d7567cbab64094b22b648d7f209cb"
 
 
 def _run(
@@ -138,6 +139,9 @@ class Env:
         assert self.run(str(self.python), "-m", "repolens", "--version").stdout.strip() == (
             f"repolens {expected_version}"
         )
+        help_text = self.run(str(self.launcher), "--help").stdout
+        assert "usage: repolens" in help_text
+        assert "scan" in help_text
         self.python_code(
             "from pathlib import Path; import importlib.metadata as m, repolens, sys; "
             "assert repolens.__version__ == m.version('repolens'); "
@@ -174,7 +178,7 @@ def wheel_lifecycle(dist: Path, version: str) -> None:
     sdist = dist / f"repolens-{version}.tar.gz"
     assert wheel.is_file()
     assert sdist.is_file()
-    assert Version(version) > Version("0.1.0")
+    assert Version(version) > Version("0.1.1.dev0")
     with tempfile.TemporaryDirectory(prefix="rl-wheel-") as directory:
         root = Path(directory)
         project = root / "sample"
@@ -219,8 +223,24 @@ def wheel_lifecycle(dist: Path, version: str) -> None:
             cwd=project,
             env=_base_env(),
         )
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "wheel",
+                "--no-deps",
+                "--wheel-dir",
+                str(wheelhouse),
+                _archive(_BASE_REPO, _DEV0_COMMIT),
+            ],
+            cwd=project,
+            env=_base_env(),
+        )
         old_wheels = list(wheelhouse.glob("repolens-0.1.0-*.whl"))
+        dev0_wheels = list(wheelhouse.glob("repolens-0.1.1.dev0-*.whl"))
         assert len(old_wheels) == 1, old_wheels
+        assert len(dev0_wheels) == 1, dev0_wheels
         upgrade_env = Env(root / "upgrade-venv", project)
         upgrade_env.pip("install", str(old_wheels[0]))
         assert upgrade_env.version() == "0.1.0"
@@ -233,9 +253,23 @@ def wheel_lifecycle(dist: Path, version: str) -> None:
             str(wheelhouse),
             "repolens",
         )
+        assert upgrade_env.version() == version
+        # The old dev0 was also downloadable from source. Verify it upgrades without a
+        # forced reinstall now that the preparation revision has a distinct version.
+        upgrade_env.pip("install", str(dev0_wheels[0]))
+        assert upgrade_env.version() == "0.1.1.dev0"
+        upgrade_env.pip(
+            "install",
+            "--upgrade",
+            "--pre",
+            "--no-index",
+            "--find-links",
+            str(wheelhouse),
+            "repolens",
+        )
         upgrade_env.smoke(version)
         upgrade_env.uninstall()
-    print("Wheel, sdist, tools extra, distinct-version upgrade and uninstall passed.")
+    print("Wheel, sdist, tools extra, 0.1.0/dev0 upgrades and uninstall passed.")
 
 
 def source_lifecycle(repository: str, head: str, version: str) -> None:
@@ -255,6 +289,9 @@ def source_lifecycle(repository: str, head: str, version: str) -> None:
         assert cast(dict[str, str], git_env.direct_url()["vcs_info"])["commit_id"] == _OLD_COMMIT
         git_env.pip("install", "--force-reinstall", "--no-deps", f"{git_url}@{_BASE_COMMIT}")
         assert cast(dict[str, str], git_env.direct_url()["vcs_info"])["commit_id"] == _BASE_COMMIT
+        git_env.pip("install", "--upgrade", f"{git_url}@{_DEV0_COMMIT}")
+        assert cast(dict[str, str], git_env.direct_url()["vcs_info"])["commit_id"] == _DEV0_COMMIT
+        assert git_env.version() == "0.1.1.dev0"
         git_env.pip("install", "--upgrade", new_git_url)
         assert cast(dict[str, str], git_env.direct_url()["vcs_info"])["commit_id"] == head
         git_env.smoke(version)
@@ -267,6 +304,7 @@ def source_lifecycle(repository: str, head: str, version: str) -> None:
         assert "Cannot find command 'git'" in missing_git.stdout, missing_git.stdout
         old_archive = _archive(_BASE_REPO, _OLD_COMMIT)
         base_archive = _archive(_BASE_REPO, _BASE_COMMIT)
+        dev0_archive = _archive(_BASE_REPO, _DEV0_COMMIT)
         new_archive = _archive(repository, head)
         archive_env.pip("install", old_archive, no_git=True)
         assert archive_env.direct_url()["url"] == old_archive
@@ -274,6 +312,9 @@ def source_lifecycle(repository: str, head: str, version: str) -> None:
         assert archive_env.direct_url()["url"] == old_archive
         archive_env.pip("install", "--force-reinstall", "--no-deps", base_archive, no_git=True)
         assert archive_env.direct_url()["url"] == base_archive
+        archive_env.pip("install", "--upgrade", dev0_archive, no_git=True)
+        assert archive_env.direct_url()["url"] == dev0_archive
+        assert archive_env.version() == "0.1.1.dev0"
         archive_env.pip("install", "--upgrade", new_archive, no_git=True)
         assert archive_env.direct_url()["url"] == new_archive
         archive_env.smoke(version)

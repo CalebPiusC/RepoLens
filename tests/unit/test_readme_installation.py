@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from repolens import __version__
+
 _README = Path(__file__).resolve().parents[2] / "README.md"
 
 
@@ -59,6 +61,12 @@ def test_readme_never_claims_repolens_is_on_pypi() -> None:
     assert "No matching distribution found for repolens" in section
     assert "intended future command" in section
     assert "currently fails" in section
+
+
+def test_readme_version_example_matches_the_package() -> None:
+    match = re.search(r"(?m)^\$ repolens --version\nrepolens (\S+)$", _readme())
+    assert match is not None
+    assert match.group(1) == __version__
 
 
 def test_platform_install_commands_are_separate() -> None:

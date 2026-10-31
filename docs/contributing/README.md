@@ -81,13 +81,17 @@ reader extracts the static string without importing RepoLens, including when bui
 sdist or GitHub archive with no `.git` directory. The CLI and report sources import the same
 value. The JSON document schema remains separately versioned in `repolens.models`.
 
-`0.1.1.dev0` is an unreleased development version. Multiple local commits may share it; pip can
-keep the earlier code in that case, so use the documented `--force-reinstall` for source updates.
-Before distributing a new pre-release or release, choose a new PEP 440 version in `_version.py`:
-for example `0.1.1.dev1` for the next distributed development build, then `0.1.1` for a final
-release. Never publish different artifacts under an already published version; start the next
-development cycle with a higher base version, for example `0.1.2.dev0` after `0.1.1`. Tags and publishing are separate, explicit
-maintainer actions — this configuration does neither.
+The main revision preceding this preparation used `0.1.1.dev0`; it was downloadable from source
+but never published to PyPI. This preparation revision uses `0.1.1.dev1` so its source is distinct;
+`0.1.1` is reserved for the separately approved first stable release. Multiple local commits can
+still share a development version; pip may keep the earlier code in that case, so use the
+documented `--force-reinstall` for same-version source updates.
+
+Before distributing any later pre-release or release, choose a new PEP 440 version in
+`_version.py`. Never publish different artifacts under an already published version; start the
+next development cycle with a higher base version, for example `0.1.2.dev0` after `0.1.1`. Tags
+and publishing are separate, explicit maintainer actions — this configuration does neither. See
+the [release readiness checklist](../release/README.md) before the first release.
 
 For a local packaging check (no upload):
 

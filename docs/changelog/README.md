@@ -1,67 +1,39 @@
 # Changelog
 
-All notable changes to RepoLens are documented in this file. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html) once released.
+This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). RepoLens has no
+tagged or published release. The JSON document schema is independently versioned at `1.1.0`.
 
-RepoLens has **no tagged release yet**: the current package version is `0.1.1.dev0` in development, installable
-from this repository, not PyPI. Everything below is therefore unreleased — do not add release/tag
-links until a tag actually exists. (The JSON *document* schema is versioned separately as
-`1.1.0`; see ADR-006.)
+## [Unreleased] — intended first stable release: 0.1.1
 
-## [Unreleased]
+These are draft notes, not a release announcement. This preparation revision is `0.1.1.dev1`;
+the preceding `0.1.1.dev0` was downloadable from source but was not published to PyPI. A stable
+`0.1.1` version, tag, and publication require separate approval.
 
-### Added
+### First-release scope
 
-**Installation reliability (unreleased)**
+The following capabilities were already present in the last `0.1.0` development baseline
+([`f4c0f46`](https://github.com/CalebPiusC/RepoLens/commit/f4c0f46c475135f9116afb6469b216cb4ebf02bd));
+that baseline was not a tagged or published release:
 
-- A single static development version, reproducible wheel and sdist configuration, distribution
-  metadata, platform-specific installation guidance, and Linux/Windows non-editable install checks.
-- Documented source-pinning, same-version reinstall behavior, optional tools, and uninstall cleanup.
-  No PyPI release or upload is implied.
+- Repository structure, Python and JavaScript/TypeScript, dependency hygiene, documentation, and
+  testing checks. Ruff, Bandit, and Biome are external tools when installed; OSV.dev vulnerability
+  lookups are explicitly opt-in.
+- A `repolens scan` CLI with terminal, deterministic JSON, and self-contained HTML output;
+  documented exit codes and incomplete-scan reporting. The JSON schema remains `1.1.0`.
+- Discovery and subprocess safeguards for scanning untrusted repositories, resource limits, and
+  redaction. See the [security model](../security/README.md) for boundaries and limitations.
 
+### Changes since the `0.1.0` development baseline
 
-**Stage 1 — foundation, engine, structure analyzer (October 2026)**
+- Single-source PEP 440 package versioning, reproducible wheel and sdist configuration, and
+  complete distribution metadata; the distribution, import, and executable are all `repolens`.
+- Installation, upgrade, optional-tool, and uninstall guidance, including the distinction between
+  same-version source reinstalls and upgrades to a new version.
+- Linux and Windows non-editable artifact and source installation checks on Python 3.11–3.13,
+  including real scans, dependency checks, and uninstall cleanup. The supported minimum is 3.11;
+  macOS is not currently covered by CI.
+- The preparation revision advances to `0.1.1.dev1` to distinguish it from the downloadable
+  `0.1.1.dev0` source. No package behavior or JSON schema change is implied by this version bump.
 
-- Pydantic v2 models (`Finding`, `AIAdvisory`, `AnalyzerOutcome`, `DiscoverySummary`,
-  `ScanReport`) with deterministic/AI separation, evidence redaction at model entry, and
-  auto-generated finding fingerprints; frozen `ScanConfig` with all resource budgets.
-- Safe discovery: iterative walk, symlink rejection, platform-scoped `O_NOFOLLOW` reads via
-  `RepositoryContext.read_text()`, sensitive-file blocking, root `.gitignore` evaluation, and
-  file/byte/depth caps with honest incomplete-coverage accounting.
-- `ScanEngine` with a fault-isolated analyzer lifecycle, and the structure analyzer
-  (`RL-STRUCT-001`–`012`, `RL-SEC-001`).
-- Hardened subprocess execution (`run_safe_command`): `shell=False`, environment allowlist,
-  per-stream output caps, whole-tree timeouts (POSIX sessions; Windows process groups +
-  `taskkill /T`).
-
-**Stage 2 — practical static analysis (October 2026)**
-
-- Python analyzers: Ruff (`E4,E7,E9,F,B`, `--isolated`) and Bandit (documented skip list);
-  JS/TS analyzer: Biome with a RepoLens-generated config. All optional, stub-tested, and run from
-  disposable workspaces without loading repository tool configuration.
-- Offline dependency hygiene (`RL-DEP-001`–`008`) for Python/npm manifests and lockfiles;
-  documentation checks (`RL-DOC-001`–`005`); testing hygiene (`RL-TEST-001`–`005`).
-- Opt-in OSV.dev vulnerability lookups (`OSV-<id>`): HTTPS-only, no redirects, coordinate-only
-  payloads, explicit incomplete-coverage outcomes on failure.
-
-**Stage 3 — CLI, terminal reporter, versioned JSON (October 2026)**
-
-- `repolens scan [PATH]` (`argparse`, no new dependencies) with `--min-severity`,
-  `--max-findings`, `--color`, `--network-checks`, and the documented `0/1/2/3/130` exit-code
-  policy, including false-clean protection for partial scans.
-- `--format json`: one deterministic, ASCII-only document on stdout
-  (`ScanReport.model_dump(mode="json")` + derived `result` verdict), schema `1.1.0`, with
-  `parse_json_document` (strict and forward-compatible modes), major-version acceptance policy,
-  and unknown-value refusal (`UnsupportedSchemaValueError`). New models/constants:
-  `ScanResult`, `ScanStatus`, `IncompleteReason`, `SCHEMA_VERSION`.
-- Documentation tree under `docs/` (architecture, ADRs, PRD, contributing, security, rules, this
-  changelog), package/test-suite READMEs, root `SECURITY.md`/`CONTRIBUTING.md` entry points, and
-  operating-system entries in `.gitignore`.
-
-### Security
-
-- Target code is never executed, imported, or installed; symlinks are never followed; sensitive
-  files are never read; subprocesses run shell-free with sanitized environments outside the
-  repository; evidence/messages are redacted in text and JSON alike; network checks are opt-in
-  and transmit package coordinates only. See [docs/security/README.md](../security/README.md).
+The [release readiness checklist](../release/README.md) records the remaining publishing and
+private vulnerability reporting prerequisites. Nothing in these notes implies a tag or upload.

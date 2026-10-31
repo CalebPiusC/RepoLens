@@ -25,6 +25,7 @@ def test_hatch_and_runtime_share_a_static_version_source() -> None:
 
 def test_project_urls_and_console_script_are_declared() -> None:
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert project["name"] == "repolens"
     assert project["scripts"]["repolens"] == "repolens.cli:main"
     assert project["urls"]["Repository"] == "https://github.com/CalebPiusC/RepoLens"
     assert project["urls"]["Issues"] == "https://github.com/CalebPiusC/RepoLens/issues"

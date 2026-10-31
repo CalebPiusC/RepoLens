@@ -89,13 +89,19 @@ def _digest(path: Path) -> str:
 def _metadata_assertions(raw: bytes, version: str) -> None:
     metadata = BytesParser().parsebytes(raw)
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    assert metadata["Name"] == "repolens"
+    assert metadata["Name"] == project["name"] == "repolens"
     assert metadata["Version"] == version
+    assert metadata["Summary"] == project["description"]
+    assert metadata["Author"] == ", ".join(author["name"] for author in project["authors"])
     assert metadata["Requires-Python"] == project["requires-python"]
+    assert set(metadata.get_all("Classifier", [])) == set(project["classifiers"])
     assert metadata["Description-Content-Type"] == "text/markdown"
     assert "MIT License" in metadata["License"]
     assert "LICENSE" in metadata.get_all("License-File", [])
-    assert "RepoLens" in metadata.get_payload()
+    description = metadata.get_payload(decode=True)
+    assert isinstance(description, bytes)
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    assert description.decode("utf-8").replace("\r\n", "\n").rstrip() == readme.rstrip()
     assert set(metadata.get_all("Provides-Extra", [])) == set(project["optional-dependencies"])
     assert set(metadata.get_all("Project-URL", [])) == {
         f"{name}, {url}" for name, url in project["urls"].items()

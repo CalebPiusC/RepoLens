@@ -46,7 +46,7 @@ RepoLens is built in incremental stages. Stages 1, 2 and 3 are complete:
 ## Requirements
 
 - Python `>= 3.11`
-- Linux, macOS, or Windows. Continuous integration runs the full suite and the quality gates on Ubuntu and Windows for Python 3.11, 3.12, and 3.13.
+- Linux, macOS, or Windows. Continuous integration runs the full suite on Ubuntu and Windows for Python 3.11, 3.12, and 3.13, and runs the quality gates on Ubuntu. macOS is not currently tested in CI.
 
 RepoLens itself has no runtime requirement on Ruff, Bandit, Biome, Node.js, or network access. External tools and OSV.dev are strictly optional.
 
@@ -138,7 +138,7 @@ Biome (JavaScript/TypeScript) is a separate npm package. See
 RepoLens is **not published to PyPI**. The intended future command, once the project is actually
 published under this name, is `python -m pip install repolens`; it currently fails with
 `No matching distribution found for repolens`. Do not substitute a similarly named package.
-The current `0.1.1.dev0` is a development version, not a public release.
+The version on this preparation branch, `0.1.1.dev1`, is a development version, not a public release.
 
 ### Upgrading and uninstalling
 
@@ -230,9 +230,11 @@ A few limits are worth knowing before you trust a clean result:
 
 ## Command-Line Usage
 
+The version shown here is for this source revision; another revision may differ.
+
 ```bash
 $ repolens --version
-repolens 0.1.1.dev0
+repolens 0.1.1.dev1
 
 $ repolens --help            # top-level help, commands, and exit codes
 $ repolens scan --help       # scan options and examples
@@ -1204,7 +1206,8 @@ below explain design and process without redefining that behavior.
 | [Contributing](https://github.com/CalebPiusC/RepoLens/blob/main/docs/contributing/README.md) | Development setup, quality gates, and how to write an analyzer |
 | [Security model](https://github.com/CalebPiusC/RepoLens/blob/main/docs/security/README.md) | Threat model, discovery and subprocess safety, and reporting guidance |
 | [Rules reference](https://github.com/CalebPiusC/RepoLens/blob/main/docs/rules/README.md) | Every rule ID with category, severity, and trigger |
-| [Changelog](https://github.com/CalebPiusC/RepoLens/blob/main/docs/changelog/README.md) | Unreleased development changes |
+| [Changelog](https://github.com/CalebPiusC/RepoLens/blob/main/docs/changelog/README.md) | Draft first-release notes and development changes |
+| [Release readiness](https://github.com/CalebPiusC/RepoLens/blob/main/docs/release/README.md) | Publishing prerequisites and proposed Trusted Publishing design |
 | [Test suite](https://github.com/CalebPiusC/RepoLens/blob/main/tests/README.md) | Test layout, stub tools, markers, and how to run subsets |
 
 ## License
