@@ -53,8 +53,11 @@ jobs:
         id: hashes
         shell: bash
         run: |
-          echo "wheel=$(sha256sum "${RUNNER_TEMP}"/repolens-canonical/*.whl | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "sdist=$(sha256sum "${RUNNER_TEMP}"/repolens-canonical/*.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          wheel=$(sha256sum "${RUNNER_TEMP}"/repolens-canonical/*.whl | cut -d' ' -f1)
+          sdist=$(sha256sum "${RUNNER_TEMP}"/repolens-canonical/*.tar.gz | cut -d' ' -f1)
+          printf 'wheel=%s\nsdist=%s\n' "$wheel" "$sdist" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Canonical wheel SHA-256::$wheel"
+          echo "::notice title=Canonical sdist SHA-256::$sdist"
 
       - name: Store canonical distributions for this test run
         id: upload
