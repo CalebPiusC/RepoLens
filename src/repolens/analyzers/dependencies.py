@@ -105,7 +105,12 @@ class DependencyAnalyzer(Analyzer):
 
     def is_applicable(self, context: RepositoryContext) -> bool:
         inventory = build_dependency_inventory(context)
-        return bool(inventory.python_manifest_paths or inventory.npm_manifest_paths)
+        return bool(
+            inventory.python_manifest_paths
+            or inventory.npm_manifest_paths
+            or inventory.problems
+            or inventory.gaps
+        )
 
     def completion_message(self) -> str | None:
         return self._message
@@ -114,6 +119,8 @@ class DependencyAnalyzer(Analyzer):
         self._reset_reporting()
         self._message = None
         inventory = build_dependency_inventory(context)
+        if message := inventory.gap_message():
+            self._mark_reporting_failure(message)
         findings: list[Finding] = []
 
         findings.extend(self._report_parse_problems(inventory))
@@ -158,6 +165,9 @@ class DependencyAnalyzer(Analyzer):
                     )
                 )
             elif problem.kind is DependencyProblemKind.MALFORMED_MANIFEST:
+                # Root manifest syntax has an existing structure-analyzer finding.
+                if problem.path in {"pyproject.toml", "package.json"}:
+                    continue
                 findings.append(
                     Finding(
                         rule_id="RL-DEP-008",
@@ -254,6 +264,8 @@ class DependencyAnalyzer(Analyzer):
             for dependency in declared:
                 locked_versions = locked_by_name.get(dependency.key)
                 if not locked_versions:
+                    if not inventory.lockfiles_complete(Ecosystem.NPM, directory):
+                        continue
                     findings.append(
                         Finding(
                             rule_id="RL-DEP-003",
@@ -373,7 +385,11 @@ class DependencyAnalyzer(Analyzer):
 
     def _check_python_lockfile(self, inventory: DependencyInventory) -> list[Finding]:
         runtime = [dep for dep in inventory.declared_for(Ecosystem.PYPI) if not dep.dev]
-        if not runtime or inventory.has_python_lockfile():
+        if (
+            not runtime
+            or inventory.has_python_lockfile()
+            or not inventory.lockfiles_complete(Ecosystem.PYPI)
+        ):
             return []
 
         unpinned = [dep for dep in runtime if dep.exact_version is None]

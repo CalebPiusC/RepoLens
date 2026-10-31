@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import errno
 import os
 import re
@@ -268,6 +269,32 @@ class RepositoryContext:
 
     def read_text(self, rel_posix_path: str) -> str:
         """Safely read UTF-8 text from a discovered, non-sensitive, size-bounded file."""
+        raw = self._read_bytes(rel_posix_path, self.config.max_file_size_bytes + 1)
+        if len(raw) > self.config.max_file_size_bytes:
+            raise OversizedFileAccessError(
+                f"File grew beyond max_file_size_bytes during scan: {rel_posix_path}"
+            )
+        return raw.decode("utf-8", errors="replace")
+
+    def read_text_prefix(self, rel_posix_path: str, max_bytes: int) -> tuple[str, bool]:
+        """Read a byte-bounded UTF-8 prefix and indicate whether content was omitted.
+
+        An incomplete UTF-8 character at the boundary is not returned as a replacement
+        character: its meaning depends on bytes outside the prefix.
+        """
+        if max_bytes < 0:
+            raise ValueError("max_bytes must be non-negative")
+        raw = self._read_bytes(rel_posix_path, min(max_bytes, self.config.max_file_size_bytes) + 1)
+        if len(raw) > self.config.max_file_size_bytes:
+            raise OversizedFileAccessError(
+                f"File grew beyond max_file_size_bytes during scan: {rel_posix_path}"
+            )
+        truncated = len(raw) > max_bytes
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        return decoder.decode(raw[:max_bytes], final=not truncated), truncated
+
+    def _read_bytes(self, rel_posix_path: str, limit: int) -> bytes:
+        """Apply the same discovery and path safety checks to full and prefix reads."""
         if (
             not rel_posix_path
             or "\x00" in rel_posix_path
@@ -311,16 +338,18 @@ class RepositoryContext:
 
         try:
             with os.fdopen(fd, "rb") as handle:
-                raw = handle.read(self.config.max_file_size_bytes + 1)
+                if os.fstat(handle.fileno()).st_size > self.config.max_file_size_bytes:
+                    raise OversizedFileAccessError(
+                        f"File grew beyond max_file_size_bytes during scan: {rel_posix_path}"
+                    )
+                raw = handle.read(limit)
+                if os.fstat(handle.fileno()).st_size > self.config.max_file_size_bytes:
+                    raise OversizedFileAccessError(
+                        f"File grew beyond max_file_size_bytes during scan: {rel_posix_path}"
+                    )
         except OSError as exc:
             raise DiscoveryError(f"Failed reading {rel_posix_path}: {exc}") from exc
-
-        if len(raw) > self.config.max_file_size_bytes:
-            raise OversizedFileAccessError(
-                f"File grew beyond max_file_size_bytes during scan: {rel_posix_path}"
-            )
-
-        return raw.decode("utf-8", errors="replace")
+        return raw
 
 
 def _detect_languages(files: list[DiscoveredFile]) -> list[DetectedLanguage]:

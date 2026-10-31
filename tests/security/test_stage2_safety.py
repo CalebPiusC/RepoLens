@@ -225,14 +225,18 @@ def test_deeply_nested_manifests_do_not_crash_the_scan(tmp_path: Path) -> None:
 
     report = ScanEngine().scan(repo)
 
-    # Parsing depth limits differ between CPython versions, so the contract asserted here
-    # is crash-freedom and isolation, not a specific diagnostic.
-    assert {outcome.status for outcome in report.analyzer_outcomes} <= {
-        AnalyzerStatus.COMPLETED,
-        AnalyzerStatus.SKIPPED,
-        AnalyzerStatus.UNAVAILABLE,
-    }
+    # Parsing depth limits differ between CPython versions. When parsing cannot finish,
+    # the dependency analyzer must report the gap rather than claiming completeness.
+    allowed = {AnalyzerStatus.COMPLETED, AnalyzerStatus.SKIPPED, AnalyzerStatus.UNAVAILABLE}
     for outcome in report.analyzer_outcomes:
+        if (
+            outcome.analyzer_name == "dependency-manifests"
+            and outcome.status is AnalyzerStatus.FAILED
+        ):
+            assert "dependency inventory incomplete" in (outcome.message or "").lower()
+            assert any(f.rule_id == "RL-DEP-001" for f in report.findings)
+        else:
+            assert outcome.status in allowed
         message = (outcome.message or "").lower()
         assert "recursionerror" not in message
         assert "maximum recursion" not in message

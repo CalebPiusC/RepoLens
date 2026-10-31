@@ -213,15 +213,6 @@ class DocumentationAnalyzer(Analyzer):
         evaluated = 0
         for number, line in enumerate(text.splitlines(), start=1):
             for match in _MARKDOWN_LINK_RE.finditer(line):
-                if len(findings) >= _MAX_LINK_FINDINGS:
-                    self._mark_reporting_failure(
-                        f"README broken-link findings reached the {_MAX_LINK_FINDINGS}-finding "
-                        "limit; remaining links were not checked."
-                    )
-                    return findings
-                if evaluated >= _MAX_LINKS_EVALUATED:
-                    return findings
-                evaluated += 1
                 target = match.group(1).strip()
                 if not target or target.lower().startswith(_EXTERNAL_PREFIXES):
                     continue
@@ -236,6 +227,21 @@ class DocumentationAnalyzer(Analyzer):
                 )
                 if ".." in PurePosixPath(candidate).parts:
                     continue
+                # Look ahead to the next eligible link before declaring a limit hit.
+                # The README itself is already bounded by safe discovery.
+                if len(findings) >= _MAX_LINK_FINDINGS:
+                    self._mark_reporting_failure(
+                        f"README broken-link findings reached the {_MAX_LINK_FINDINGS}-finding "
+                        "limit; remaining eligible links were not checked."
+                    )
+                    return findings
+                if evaluated >= _MAX_LINKS_EVALUATED:
+                    self._mark_reporting_failure(
+                        f"README link checks reached the {_MAX_LINKS_EVALUATED}-link limit; "
+                        "remaining eligible links were not checked."
+                    )
+                    return findings
+                evaluated += 1
                 if self._path_exists(context, candidate):
                     continue
                 findings.append(
