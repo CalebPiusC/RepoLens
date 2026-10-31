@@ -15,8 +15,9 @@ There are no RepoLens tags, GitHub releases, or PyPI uploads. The preparation re
   reviews and checks, and restrict release-tag creation or modification.
 - GitHub private vulnerability reporting is disabled, and no other private contact is documented.
   The owner must enable it or add an authorized private reporting channel before release.
-- The current installation matrix builds and tests artifacts on each runner; it does **not**
-  promote one previously verified artifact set to PyPI. It is not a release provenance system.
+- The installation matrix builds and tests artifacts on each runner and also installs the same
+  hash-verified CI build on Linux and Windows. It does **not** promote those artifacts to PyPI and
+  is not a release provenance system.
 - `0.1.1.dev0` was already downloadable from source and must not be published. This revision
   advances to `0.1.1.dev1`, also unpublished; `0.1.1` is reserved for a separately approved
   stable release. Do not replace published artifacts or reuse a published version.

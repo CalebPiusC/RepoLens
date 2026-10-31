@@ -2,7 +2,8 @@
 
 The optional ``seed`` command creates obviously fake local files in a disposable CI
 checkout to verify the build allowlist. ``check`` inspects two independent builds and
-a direct wheel; no uploaded artifact is involved.
+a direct wheel. ``verify-canonical`` checks the workflow artifact against the build job's
+hashes before each operating system installs it; it does not publish anything.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import configparser
 import contextlib
 import hashlib
 import os
+import re
 import runpy
 import sys
 import tarfile
@@ -178,6 +180,24 @@ def check(first: Path, second: Path, direct: Path) -> None:
     )
 
 
+def verify_canonical(directory: Path) -> None:
+    """Fail closed if the cross-platform test handoff changed either distribution."""
+    version = cast(str, runpy.run_path(str(_ROOT / "src/repolens/_version.py"))["__version__"])
+    expected = {
+        directory / f"repolens-{version}-py3-none-any.whl": os.environ.get(
+            "REPOLENS_WHEEL_SHA256", ""
+        ),
+        directory / f"repolens-{version}.tar.gz": os.environ.get("REPOLENS_SDIST_SHA256", ""),
+    }
+    assert set(directory.iterdir()) == set(expected), "unexpected or missing canonical files"
+    for path, digest in expected.items():
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), f"invalid expected SHA-256: {path.name}"
+        assert path.is_file(), f"not a regular file: {path}"
+        assert not path.is_symlink(), f"symbolic link in canonical artifacts: {path}"
+        assert _digest(path) == digest, f"canonical artifact hash mismatch: {path.name}"
+        print(f"canonical sha256 {path.name}: {digest}")
+
+
 def main() -> None:
     if sys.argv[1:] == ["seed"]:
         seed()
@@ -185,8 +205,13 @@ def main() -> None:
         clean()
     elif len(sys.argv) == 5 and sys.argv[1] == "check":
         check(*(Path(arg) for arg in sys.argv[2:]))
+    elif len(sys.argv) == 3 and sys.argv[1] == "verify-canonical":
+        verify_canonical(Path(sys.argv[2]))
     else:
-        raise SystemExit("Usage: check_artifacts.py seed | clean | check FIRST SECOND DIRECT")
+        raise SystemExit(
+            "Usage: check_artifacts.py seed | clean | check FIRST SECOND DIRECT "
+            "| verify-canonical DIRECTORY"
+        )
 
 
 if __name__ == "__main__":

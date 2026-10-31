@@ -30,8 +30,8 @@ that baseline was not a tagged or published release:
 - Installation, upgrade, optional-tool, and uninstall guidance, including the distinction between
   same-version source reinstalls and upgrades to a new version.
 - Linux and Windows non-editable artifact and source installation checks on Python 3.11–3.13,
-  including real scans, dependency checks, and uninstall cleanup. The supported minimum is 3.11;
-  macOS is not currently covered by CI.
+  including a shared hash-verified wheel and sdist, real scans, dependency checks, and uninstall
+  cleanup. The supported minimum is 3.11; macOS is not currently covered by CI.
 - The preparation revision advances to `0.1.1.dev1` to distinguish it from the downloadable
   `0.1.1.dev0` source. No package behavior or JSON schema change is implied by this version bump.
 

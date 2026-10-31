@@ -24,8 +24,50 @@ env:
   REPOLENS_SOURCE_URL: https://github.com/${{ github.event.pull_request.head.repo.full_name || github.repository }}/archive/${{ github.event.pull_request.head.sha || github.sha }}.zip
 
 jobs:
+  canonical_artifacts:
+    name: Build canonical installation artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      wheel_sha256: ${{ steps.hashes.outputs.wheel }}
+      sdist_sha256: ${{ steps.hashes.outputs.sdist }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Build and check the canonical distributions
+        run: |
+          python -m pip install build twine
+          python -m build --outdir "${{ runner.temp }}/repolens-canonical"
+          python -m twine check --strict "${{ runner.temp }}/repolens-canonical/*"
+
+      - name: Record canonical distribution hashes
+        id: hashes
+        shell: bash
+        run: |
+          echo "wheel=$(sha256sum "${RUNNER_TEMP}"/repolens-canonical/*.whl | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "sdist=$(sha256sum "${RUNNER_TEMP}"/repolens-canonical/*.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Store canonical distributions for this test run
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: canonical-installation-distributions
+          path: ${{ runner.temp }}/repolens-canonical/*
+          if-no-files-found: error
+          retention-days: 1
+
   installation:
     name: Install (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    needs: canonical_artifacts
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -69,6 +111,21 @@ jobs:
 
       - name: Remove fake packaging sentinels
         run: python tests/installation/check_artifacts.py clean
+
+      - name: Download the same canonical distributions on every runner
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.canonical_artifacts.outputs.artifact_id }}
+          path: ${{ runner.temp }}/repolens-canonical
+          merge-multiple: true
+
+      - name: Verify and install the canonical wheel and sdist
+        env:
+          REPOLENS_WHEEL_SHA256: ${{ needs.canonical_artifacts.outputs.wheel_sha256 }}
+          REPOLENS_SDIST_SHA256: ${{ needs.canonical_artifacts.outputs.sdist_sha256 }}
+        run: |
+          python tests/installation/check_artifacts.py verify-canonical "${{ runner.temp }}/repolens-canonical"
+          python tests/installation/lifecycle.py wheel --directory "${{ runner.temp }}/repolens-canonical"
 
       - name: Fresh wheel and sdist installs, extras, upgrade and uninstall
         run: python tests/installation/lifecycle.py wheel --directory "${{ runner.temp }}/repolens-dist-a"

@@ -49,7 +49,8 @@ The existing quality CI (`.github/workflows/ci.yml`) has two jobs:
 
 The separate installation workflow (`.github/workflows/installation.yml`) builds and inspects
 distributions and exercises non-editable installation, source updates, and uninstall on Linux and
-Windows with Python 3.11–3.13. It needs GitHub and package-index access. There is no macOS job.
+Windows with Python 3.11–3.13. It also installs one shared, hash-verified wheel and sdist on every
+runner. It needs GitHub and package-index access. There is no macOS job.
 
 Run the full gate locally before pushing:
 
