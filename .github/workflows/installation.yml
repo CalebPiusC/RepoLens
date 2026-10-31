@@ -98,4 +98,21 @@ jobs:
 
       - name: Existing Windows regression suite
         if: runner.os == 'Windows' && github.event_name == 'push'
-        run: python -m pytest -q
+        shell: pwsh
+        run: |
+          $resultPath = Join-Path $env:RUNNER_TEMP 'windows-pytest.xml'
+          python -m pytest -q --tb=short "--junitxml=$resultPath"
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) {
+            if (Test-Path $resultPath) {
+              [xml]$report = Get-Content -Raw $resultPath
+              foreach ($case in $report.SelectNodes('//testcase[failure or error]')) {
+                $failure = $case.SelectSingleNode('failure | error')
+                $detail = $failure.InnerText
+                if ($detail.Length -gt 6000) { $detail = $detail.Substring(0, 6000) }
+                $detail = $detail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                Write-Host "::error::$($case.classname).$($case.name): $detail"
+              }
+            }
+            exit $testExit
+          }
