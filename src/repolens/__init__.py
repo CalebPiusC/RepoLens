@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
-
+from repolens._version import __version__
 from repolens.config import ScanConfig
 from repolens.engine import ScanEngine
 from repolens.exceptions import (

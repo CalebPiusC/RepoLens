@@ -14,28 +14,42 @@ such as `pytest` would not be found. Use `pip` in a virtual environment, exactly
 Prerequisites: Python 3.11 or later and Git. Node.js/Biome are optional (only for exercising the
 real Biome analyzer; tests stub it).
 
-```bash
+Clone the source, then create and activate an environment on Linux/macOS:
+
+```sh
 git clone https://github.com/CalebPiusC/RepoLens.git
 cd RepoLens
-
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-
-python -m pip install --upgrade pip
-pip install -e ".[dev]"            # editable install: pytest, pytest-cov, mypy, ruff, bandit
+. .venv/bin/activate
+python -m pip install -e ".[dev]"
 ```
 
-`pip install ".[tools]"` installs just Ruff + Bandit alongside RepoLens; `dev` already includes
-them. RepoLens is not published to PyPI — always install from this checkout. Every CLI invocation
-also works as `python -m repolens …`.
+In Windows PowerShell:
+
+```powershell
+git clone https://github.com/CalebPiusC/RepoLens.git
+Set-Location RepoLens
+py -3 -m venv .venv
+& .\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+```
+
+`python -m pip install ".[tools]"` installs just Ruff + Bandit alongside RepoLens; `dev` already
+includes them. RepoLens is not published to PyPI. Editable installs are for development; the
+[installation guide](../../README.md#installation) documents non-editable source installs.
+Every CLI invocation also works as `python -m repolens …`.
 
 ## Running the checks (same as CI)
 
-CI (`.github/workflows/ci.yml`) has two jobs:
+The existing quality CI (`.github/workflows/ci.yml`) has two jobs:
 
 - **Quality (Ubuntu, Python 3.11/3.12/3.13):** Ruff lint, Ruff format check, strict mypy over
   `src` **and** `tests`, then pytest with coverage.
-- **Tests (Windows, Python 3.11/3.12/3.13):** `python -m pytest -q` only. There is no macOS job.
+- **Tests (Windows, Python 3.11/3.12/3.13):** `python -m pytest -q` only.
+
+The separate installation workflow (`.github/workflows/installation.yml`) builds and inspects
+distributions and exercises non-editable installation, source updates, and uninstall on Linux and
+Windows with Python 3.11–3.13. It needs GitHub and package-index access. There is no macOS job.
 
 Run the full gate locally before pushing:
 
@@ -59,6 +73,41 @@ Notes:
 
 See [tests/README.md](../../tests/README.md) for test layout, stub tools, markers, and how to run
 subsets. The default suite needs no network and no Ruff/Bandit/Biome installation.
+
+## Versioning and distribution builds
+
+`src/repolens/_version.py` is the **only** package-version source. Hatchling's built-in version
+reader extracts the static string without importing RepoLens, including when building from an
+sdist or GitHub archive with no `.git` directory. The CLI and report sources import the same
+value. The JSON document schema remains separately versioned in `repolens.models`.
+
+`0.1.1.dev0` is an unreleased development version. Multiple local commits may share it; pip can
+keep the earlier code in that case, so use the documented `--force-reinstall` for source updates.
+Before distributing a new pre-release or release, choose a new PEP 440 version in `_version.py`:
+for example `0.1.1.dev1` for the next distributed development build, then `0.1.1` for a final
+release. Never publish different artifacts under an already published version; start the next
+development cycle with a higher base version, for example `0.1.2.dev0` after `0.1.1`. Tags and publishing are separate, explicit
+maintainer actions — this configuration does neither.
+
+For a local packaging check (no upload):
+
+```sh
+python -m pip install build twine
+SOURCE_DATE_EPOCH=1735689600 python -m build
+python -m twine check dist/*
+```
+
+In PowerShell, set `$env:SOURCE_DATE_EPOCH = "1735689600"` before `python -m build` and run
+`python -m twine check dist/*`. Clean old artifacts out of `dist/` first when checking a new build.
+The build backend is pinned and reproducible timestamps are enabled. CI compares two builds with
+the same source, epoch, and toolchain; this is not a fully hermetic dependency lock or a promise
+that different platforms or build dependency versions produce identical bytes.
+
+The wheel and sdist select package Python sources and `py.typed`, not the whole checkout. Hatchling
+also includes the project README, license, build metadata, and tracked `.gitignore` in the sdist.
+If adding required non-Python package data, update the allowlists for **both** targets and their
+artifact checks. Review the archive contents before any future release; local settings, credentials,
+tests, caches, and unrelated files must not be shipped.
 
 ## Writing a new analyzer
 

@@ -5,13 +5,25 @@ development setup with `pip`, the exact quality gates CI runs (`ruff`, `mypy src
 `pytest` with coverage), a runnable new-analyzer example, JSON schema-change rules, and the
 pull-request process.
 
-Quick start:
+Quick start (Linux/macOS):
 
-```bash
+```sh
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+. .venv/bin/activate
+python -m pip install -e ".[dev]"
 ruff check src tests && ruff format --check src tests && mypy src tests && pytest
+```
+
+Windows PowerShell:
+
+```powershell
+py -3 -m venv .venv
+& .\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+ruff check src tests
+ruff format --check src tests
+mypy src tests
+python -m pytest
 ```
 
 For vulnerabilities in RepoLens itself, do not open a public issue — see

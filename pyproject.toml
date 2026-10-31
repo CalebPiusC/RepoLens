@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling>=1.24.0"]
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "repolens"
-version = "0.1.0"
+dynamic = ["version"]
 description = "An open-source repository health checker for Python and JavaScript/TypeScript projects."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -40,6 +40,13 @@ dependencies = [
     "pydantic>=2.7,<3.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/CalebPiusC/RepoLens"
+Repository = "https://github.com/CalebPiusC/RepoLens"
+Documentation = "https://github.com/CalebPiusC/RepoLens#readme"
+Issues = "https://github.com/CalebPiusC/RepoLens/issues"
+Changelog = "https://github.com/CalebPiusC/RepoLens/blob/main/docs/changelog/README.md"
+
 [project.scripts]
 repolens = "repolens.cli:main"
 
@@ -57,8 +64,39 @@ dev = [
     "ruff>=0.6,<1.0",
 ]
 
+# One static source of truth; no Git tags, SCM plugins, or network needed to read it.
+[tool.hatch.version]
+path = "src/repolens/_version.py"
+
+[tool.hatch.build]
+reproducible = true
+# Even within the package tree, do not ship tests or common local/secret Python files.
+exclude = [
+    "**/tests/",
+    "**/test_*.py",
+    "**/conftest.py",
+    "**/local_*.py",
+    "**/*_local.py",
+    "**/credentials.py",
+    "**/credentials_*.py",
+    "**/*_credentials.py",
+    "**/secrets.py",
+    "**/.*/",
+    "**/.*.py",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/repolens/**/*.py",
+    "/src/repolens/py.typed",
+    "/pyproject.toml",
+    "/README.md",
+    "/LICENSE",
+]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/repolens"]
+include = ["/src/repolens/**/*.py", "/src/repolens/py.typed"]
+sources = ["src"]
 
 [tool.ruff]
 target-version = "py311"

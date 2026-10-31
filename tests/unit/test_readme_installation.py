@@ -41,34 +41,53 @@ def _section(heading: str) -> str:
     return " ".join(readme[start:].split())
 
 
-def test_readme_documents_installing_from_the_github_url() -> None:
-    """The supported install method must be documented as a URL, not only as a clone."""
+def test_readme_documents_source_installs_and_pins() -> None:
     section = _section("## Installation")
+    base = "https://github.com/CalebPiusC/RepoLens"
 
-    assert 'pip install "git+https://github.com/CalebPiusC/RepoLens.git"' in section
-    # A pinned form must be offered for reproducible installs.
-    assert "@<commit-sha>" in section
-    # The `tools` extra must be installable without a checkout.
-    assert "repolens[tools] @ git+https://github.com/CalebPiusC/RepoLens.git" in section
+    assert f"{base}/archive/refs/heads/main.zip" in section
+    assert f"{base}/archive/<full-commit-sha>.zip" in section
+    assert f"git+{base}.git@<full-commit-sha>" in section
+    assert f"repolens[tools] @ {base}/archive/refs/heads/main.zip" in section
+    assert "does **not** lock transitive dependency versions" in section
 
 
 def test_readme_never_claims_repolens_is_on_pypi() -> None:
-    """`pip install repolens` fails; the README must say so instead of recommending it."""
     section = _section("### PyPI")
 
     assert "not published to PyPI" in section
     assert "No matching distribution found for repolens" in section
-    # Any bare `pip install repolens` may only appear as the expected failure.
-    for line in _readme().splitlines():
-        if "pip install repolens" in line:
-            assert "fails" in line or "ERROR" in line, line
+    assert "intended future command" in section
+    assert "currently fails" in section
 
 
-def test_readme_keeps_development_installation_separate() -> None:
-    section = _section("### Development installation")
+def test_platform_install_commands_are_separate() -> None:
+    linux = _section("### Linux and macOS")
+    windows = _section("### Windows (PowerShell)")
 
-    assert 'pip install -e ".[dev]"' in section
-    assert "docs/contributing/README.md" in section
+    assert 'python3 -m venv "$HOME/.venvs/repolens"' in linux
+    assert '. "$HOME/.venvs/repolens/bin/activate"' in linux
+    assert 'py -3 -m venv "$HOME\\.venvs\\repolens"' in windows
+    assert 'Scripts\\Activate.ps1"' in windows
+    assert "Scripts\\repolens.exe" in windows
+    for section in (linux, windows):
+        assert "python -m pip install" in section
+        assert "python -m pip check" in section
+        assert "repolens --version" in section
+        assert "repolens scan ." in section
+
+
+def test_upgrade_uninstall_and_development_installation() -> None:
+    lifecycle = _section("### Upgrading and uninstalling")
+    development = _section("### Development installation")
+
+    assert "not available yet" in lifecycle
+    assert "--force-reinstall" in lifecycle
+    assert "same package version" in lifecycle
+    assert "python -m pip uninstall repolens" in lifecycle
+    assert "shared dependencies" in lifecycle
+    assert 'python -m pip install -e ".[dev]"' in development
+    assert "docs/contributing/README.md" in development
 
 
 @pytest.mark.parametrize(
@@ -103,6 +122,7 @@ def test_troubleshooting_covers_the_documented_failure_modes() -> None:
         "### The `repolens` command is not recognized",
         "### Ruff or Bandit is reported as `unavailable` even though it is installed",
         "### Python or pip is not available",
+        "### Git is not found during installation",
         "### Installation fails because of the Python version",
         "### The scan reports findings from unrelated code",
     ):
