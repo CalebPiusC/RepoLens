@@ -39,6 +39,9 @@ def _run(
         "HOME": os.environ.get("HOME", str(Path.home())),
         "LANG": "C.UTF-8",
         "NO_COLOR": "1",
+        # The child and parent must agree even when the Windows runner uses UTF-8 mode
+        # but redirected child output defaults to the active ANSI code page.
+        "PYTHONIOENCODING": "utf-8",
         "PYTHONPATH": os.pathsep.join(
             [str(_SRC), *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]
         ),
@@ -55,6 +58,7 @@ def _run(
         [*_cli_argv(), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=timeout,
         env=env,
         check=False,
@@ -174,21 +178,9 @@ def test_entry_point_exit_code_is_usable_from_a_shell_pipeline(
     if not packaged_cli_available:  # pragma: no cover - environment dependent
         pytest.skip("repolens console script is not installed in this environment")
     repo = make_python_repo(include_license=False)
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "PYTHONPATH": str(_SRC),
-        "NO_COLOR": "1",
-    }
 
     # A shell checks the exit status; gating on it must stop the chain on findings.
-    result = subprocess.run(  # fixed argv, shell-free
-        [*_cli_argv(), "scan", str(repo), "--color", "never"],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        env=env,
-        check=False,
-    )
+    result = _run(["scan", str(repo), "--color", "never"], timeout=180)
     assert result.returncode != 0
     assert "finding(s) detected" in result.stdout
 
