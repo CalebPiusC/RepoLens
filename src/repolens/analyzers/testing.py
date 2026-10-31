@@ -16,8 +16,9 @@ from typing import Any, cast
 from repolens import __version__
 from repolens.analyzers.base import Analyzer
 from repolens.config import ScanConfig
-from repolens.dependencies import Ecosystem, build_dependency_inventory
+from repolens.dependencies import DependencyInventory, Ecosystem, build_dependency_inventory
 from repolens.discovery import DiscoveredFile, RepositoryContext
+from repolens.exceptions import DiscoveryError, OversizedFileAccessError, SensitiveFileAccessError
 from repolens.models import (
     Category,
     Confidence,
@@ -96,12 +97,20 @@ def _suffix(path: str) -> str:
     return PurePosixPath(path).suffix.lower()
 
 
-def _safe_text(context: RepositoryContext, path: str) -> str:
-    """Read a discovered file defensively, returning an empty string on failure."""
+def _eligible(context: RepositoryContext, item: DiscoveredFile) -> bool:
+    return not (
+        item.is_sensitive
+        or item.is_oversized
+        or (context.has_gitignore and context.gitignore.is_ignored(item.path, is_dir=False))
+    )
+
+
+def _safe_text(context: RepositoryContext, path: str) -> str | None:
+    """Distinguish an empty file from an input that became unavailable."""
     try:
         return context.read_text(path)
-    except Exception:  # the file may have vanished mid-scan
-        return ""
+    except (DiscoveryError, OversizedFileAccessError, SensitiveFileAccessError, OSError):
+        return None
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -175,6 +184,7 @@ class TestingAnalyzer(Analyzer):
                 jsts_tests=jsts_tests,
                 declared_python=declared_python,
                 declared_npm=declared_npm,
+                inventory=inventory,
             )
         )
         findings.extend(
@@ -183,7 +193,7 @@ class TestingAnalyzer(Analyzer):
                 has_tests=bool(python_tests or jsts_tests),
                 declared_python=declared_python,
                 declared_npm=declared_npm,
-                config=config,
+                inventory=inventory,
             )
         )
         findings.extend(
@@ -191,6 +201,7 @@ class TestingAnalyzer(Analyzer):
                 context,
                 python_tests=python_tests,
                 declared_python=declared_python,
+                inventory=inventory,
             )
         )
 
@@ -203,9 +214,7 @@ class TestingAnalyzer(Analyzer):
     def _candidate_files(self, context: RepositoryContext) -> list[DiscoveredFile]:
         selected: list[DiscoveredFile] = []
         for item in context.files:
-            if item.is_sensitive or item.is_oversized:
-                continue
-            if context.has_gitignore and context.gitignore.is_ignored(item.path, is_dir=False):
+            if not _eligible(context, item):
                 continue
             suffix = _suffix(item.path)
             if suffix in _PYTHON_SUFFIXES or suffix in _JS_TS_SUFFIXES:
@@ -255,11 +264,27 @@ class TestingAnalyzer(Analyzer):
         jsts_tests: list[DiscoveredFile],
         declared_python: set[str],
         declared_npm: set[str],
+        inventory: DependencyInventory,
     ) -> list[Finding]:
         findings: list[Finding] = []
-        names = {PurePosixPath(item.path).name for item in context.files}
+        names = {
+            PurePosixPath(item.path).name for item in context.files if _eligible(context, item)
+        }
 
-        if python_tests and not self._python_runner_configured(context, declared_python, names):
+        python_runner = (
+            self._python_runner_configured(context, declared_python, names)
+            if python_tests
+            else True
+        )
+        if (
+            python_tests
+            and python_runner is not True
+            and (python_runner is None or not inventory.declarations_complete(Ecosystem.PYPI))
+        ):
+            self._mark_reporting_failure(
+                "Python test runner configuration or dependency declarations could not be verified."
+            )
+        elif python_tests and python_runner is False:
             findings.append(
                 Finding(
                     rule_id="RL-TEST-003",
@@ -285,7 +310,19 @@ class TestingAnalyzer(Analyzer):
                 )
             )
 
-        if jsts_tests and not self._jsts_runner_configured(context, declared_npm, names):
+        jsts_runner = (
+            self._jsts_runner_configured(context, declared_npm, names) if jsts_tests else True
+        )
+        if (
+            jsts_tests
+            and jsts_runner is not True
+            and (jsts_runner is None or not inventory.declarations_complete(Ecosystem.NPM))
+        ):
+            self._mark_reporting_failure(
+                "JavaScript test runner configuration or dependency declarations could not be "
+                "verified."
+            )
+        elif jsts_tests and jsts_runner is False:
             findings.append(
                 Finding(
                     rule_id="RL-TEST-003",
@@ -315,43 +352,54 @@ class TestingAnalyzer(Analyzer):
     @staticmethod
     def _python_runner_configured(
         context: RepositoryContext, declared_python: set[str], names: set[str]
-    ) -> bool:
-        if declared_python & _PYTHON_RUNNERS:
+    ) -> bool | None:
+        if declared_python & _PYTHON_RUNNERS or names & _PYTHON_RUNNER_FILES:
             return True
-        if names & _PYTHON_RUNNER_FILES:
-            return True
+        unknown = False
         pyproject = context.files_by_path.get("pyproject.toml")
-        if pyproject is not None and not pyproject.is_oversized and not pyproject.is_sensitive:
-            try:
-                data = tomllib.loads(context.read_text("pyproject.toml"))
-            except tomllib.TOMLDecodeError:
-                return False
-            tool = _as_mapping(data.get("tool"))
-            if "pytest" in tool or "tox" in tool or "nox" in tool:
-                return True
+        if pyproject is not None and _eligible(context, pyproject):
+            text = _safe_text(context, pyproject.path)
+            if text is None:
+                unknown = True
+            else:
+                try:
+                    data = tomllib.loads(text)
+                except tomllib.TOMLDecodeError:
+                    unknown = True
+                else:
+                    tool = _as_mapping(data.get("tool"))
+                    if "pytest" in tool or "tox" in tool or "nox" in tool:
+                        return True
         setup_cfg = context.files_by_path.get("setup.cfg")
-        if setup_cfg is not None and not setup_cfg.is_oversized:
-            return "[tool:pytest]" in _safe_text(context, "setup.cfg")
-        return False
+        if setup_cfg is not None and _eligible(context, setup_cfg):
+            text = _safe_text(context, setup_cfg.path)
+            if text is None:
+                unknown = True
+            elif "[tool:pytest]" in text:
+                return True
+        return None if unknown else False
 
     @staticmethod
     def _jsts_runner_configured(
         context: RepositoryContext, declared_npm: set[str], names: set[str]
-    ) -> bool:
+    ) -> bool | None:
         if declared_npm & _JS_RUNNERS:
             return True
         if any(name.startswith(_JS_RUNNER_FILE_PREFIXES) for name in names):
             return True
 
         package_json = context.files_by_path.get("package.json")
-        if package_json is None or package_json.is_oversized or package_json.is_sensitive:
+        if package_json is None or not _eligible(context, package_json):
             return False
+        text = _safe_text(context, package_json.path)
+        if text is None:
+            return None
         try:
-            data = json.loads(context.read_text("package.json"))
-        except (json.JSONDecodeError, RecursionError):
-            return False
+            data = json.loads(text)
+        except (ValueError, RecursionError):
+            return None
         if not isinstance(data, dict):
-            return False
+            return None
         scripts = _as_mapping(cast("dict[str, Any]", data).get("scripts"))
         test_script = scripts.get("test")
         if not isinstance(test_script, str):
@@ -369,14 +417,22 @@ class TestingAnalyzer(Analyzer):
         has_tests: bool,
         declared_python: set[str],
         declared_npm: set[str],
-        config: ScanConfig,
+        inventory: DependencyInventory,
     ) -> list[Finding]:
         if not has_tests:
             return []
         declared_coverage = (declared_python | declared_npm) & _COVERAGE_TOOLS
-        if not declared_coverage:
+        unknown_declarations = not (
+            inventory.declarations_complete(Ecosystem.PYPI)
+            and inventory.declarations_complete(Ecosystem.NPM)
+        )
+        if not declared_coverage and not unknown_declarations:
             return []
-        if self._coverage_configured(context):
+        configured = self._coverage_configured(context)
+        if configured is True:
+            return []
+        if not declared_coverage or configured is None:
+            self._mark_reporting_failure("Coverage tooling or configuration could not be verified.")
             return []
 
         tools = ", ".join(sorted(declared_coverage))
@@ -402,26 +458,36 @@ class TestingAnalyzer(Analyzer):
         ]
 
     @staticmethod
-    def _coverage_configured(context: RepositoryContext) -> bool:
-        names = {PurePosixPath(item.path).name for item in context.files}
+    def _coverage_configured(context: RepositoryContext) -> bool | None:
+        names = {
+            PurePosixPath(item.path).name for item in context.files if _eligible(context, item)
+        }
         if names & _COVERAGE_FILE_NAMES:
             return True
+        unknown = False
         pyproject = context.files_by_path.get("pyproject.toml")
-        if pyproject is not None and not pyproject.is_oversized and not pyproject.is_sensitive:
-            try:
-                data = tomllib.loads(context.read_text("pyproject.toml"))
-            except tomllib.TOMLDecodeError:
-                data = {}
-            tool = _as_mapping(data.get("tool"))
-            if "coverage" in tool:
-                return True
+        if pyproject is not None and _eligible(context, pyproject):
+            text = _safe_text(context, pyproject.path)
+            if text is None:
+                unknown = True
+            else:
+                try:
+                    data = tomllib.loads(text)
+                except tomllib.TOMLDecodeError:
+                    unknown = True
+                else:
+                    if "coverage" in _as_mapping(data.get("tool")):
+                        return True
         for name in ("vitest.config.ts", "vitest.config.js", "vite.config.ts", "vite.config.js"):
             item = context.files_by_path.get(name)
-            if item is None or item.is_oversized or item.is_sensitive:
+            if item is None or not _eligible(context, item):
                 continue
-            if "coverage" in _safe_text(context, name):
+            text = _safe_text(context, name)
+            if text is None:
+                unknown = True
+            elif "coverage" in text:
                 return True
-        return False
+        return None if unknown else False
 
     def _check_undeclared_pytest(
         self,
@@ -429,18 +495,30 @@ class TestingAnalyzer(Analyzer):
         *,
         python_tests: list[DiscoveredFile],
         declared_python: set[str],
+        inventory: DependencyInventory,
     ) -> list[Finding]:
         if not python_tests or "pytest" in declared_python:
             return []
 
+        incomplete_sample = len(python_tests) > _MAX_TEST_FILES_READ
         for item in python_tests[:_MAX_TEST_FILES_READ]:
-            if item.is_sensitive or item.is_oversized:
+            try:
+                text, truncated = context.read_text_prefix(item.path, _MAX_TEST_BYTES)
+            except (DiscoveryError, OversizedFileAccessError, SensitiveFileAccessError, OSError):
+                incomplete_sample = True
                 continue
-            text = _safe_text(context, item.path)
-            if len(text) > _MAX_TEST_BYTES:
-                text = text[:_MAX_TEST_BYTES]
-            if not re.search(r"^\s*(?:import pytest|from pytest\b)", text, re.MULTILINE):
+            match = re.search(r"^\s*(?:import pytest\b|from pytest\b)", text, re.MULTILINE)
+            # A match ending at a truncated boundary may continue as a longer identifier.
+            witness = match is not None and (not truncated or match.end() < len(text))
+            if not witness:
+                incomplete_sample |= truncated
                 continue
+            if not inventory.declarations_complete(Ecosystem.PYPI):
+                self._mark_reporting_failure(
+                    "pytest was imported, but incomplete dependency declarations prevent "
+                    "verification of whether it is declared."
+                )
+                return []
             return [
                 Finding(
                     rule_id="RL-TEST-005",
@@ -464,6 +542,11 @@ class TestingAnalyzer(Analyzer):
                     source=_SOURCE,
                 )
             ]
+        if incomplete_sample:
+            self._mark_reporting_failure(
+                "Python test files or their byte-bounded contents could not all be checked "
+                "for pytest imports."
+            )
         return []
 
 

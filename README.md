@@ -597,6 +597,14 @@ eligible-file coverage. Biome's
 `summary.diagnosticsNotPrinted` and truncated **stdout** trigger a reporting failure; truncated
 **stderr** alone does not. JSON schema `1.1.0` and its existing enum values are unchanged.
 
+The README link checker inspects at most 500 eligible relative links and retains up to 10
+broken-link findings. It reports a failure only when another eligible link remains unchecked.
+The pytest-import check examines at most 20 eligible Python test files and the first 131,072
+bytes of each; omitted or unreadable content is incomplete only when it could change the
+result. A known pytest declaration or a conclusive import witness can resolve that check
+without reading later files. Unreadable runner or coverage configuration is treated as unknown,
+not as proof that configuration is absent.
+
 ### Guarantees
 
 - **Nothing but the document on stdout.** No banner, progress text, ANSI color (even with
@@ -867,7 +875,14 @@ Parsed manifests and lockfiles:
 Notes and limitations:
 
 - `setup.py` is **never executed**, so projects that declare dependencies only in `setup.py` are not dependency-audited. `bun.lock`/`bun.lockb` are detected but not parsed (`RL-DEP-007`).
-- `pnpm-lock.yaml` parsing is best-effort and marked incomplete, so pnpm projects are not checked for manifest/lockfile drift.
+- `pnpm-lock.yaml` parsing is best-effort, so pnpm lockfiles are not used to establish
+  manifest/lockfile drift. Recognizable coordinates are retained; uninterpretable package or
+  snapshot entries make dependency analysis and an enabled OSV check incomplete. An empty
+  package section does not by itself make the scan incomplete.
+- Dependency inventory reads at most 80 eligible manifests and lockfiles. Unreadable inputs,
+  additional eligible inputs, and npm v1 package entries beyond the depth-12 limit are
+  reported as incomplete rather than silently treated as absent. Findings and coordinates
+  already collected are retained; the network-disabled OSV check remains skipped.
 - Semver range checks only cover provable simple constraints (`^`, `~`, `=`, exact). Complex ranges, `||`, aliases, and workspace/file/git specifiers are skipped instead of guessed.
 - Paths are matched per directory, so monorepo workspaces are compared against the lockfile next to their own `package.json`.
 

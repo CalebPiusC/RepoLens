@@ -27,6 +27,7 @@ from typing import Any, cast
 from packaging.requirements import InvalidRequirement, Requirement
 
 from repolens.discovery import RepositoryContext
+from repolens.exceptions import DiscoveryError, OversizedFileAccessError, SensitiveFileAccessError
 
 _MAX_PARSED_FILES = 80
 _MAX_LOCK_TREE_DEPTH = 12
@@ -50,7 +51,8 @@ _REQUIREMENTS_OPTION_PREFIXES = (
     "--editable",
     "--hash",
 )
-_PNPM_ENTRY_RE = re.compile(r"^ {2}/?((?:@[^/@\s]+/)?[^@\s:]+)@([^():\s]+)(?:\([^)]*\))?:$")
+_PNPM_KEY_RE = re.compile(r"^(.+?):(?:\s|$)")
+_PNPM_SECTION_RE = re.compile(r"^(?:packages|snapshots)\s*:\s*(.*)$")
 
 _PYPROJECT_LOCKFILES = frozenset({"poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock"})
 _NPM_LOCKFILES = frozenset(
@@ -143,6 +145,17 @@ class LockfileSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class DependencyInventoryGap:
+    """Eligible dependency data that could not be inventoried completely."""
+
+    path: str
+    ecosystem: Ecosystem
+    reason: str
+    affects_declarations: bool
+    affects_lockfiles: bool
+
+
+@dataclass(frozen=True, slots=True)
 class DependencyInventory:
     """Normalized, offline view of every dependency manifest and lockfile in a repository."""
 
@@ -152,6 +165,30 @@ class DependencyInventory:
     lockfiles: tuple[LockfileSummary, ...] = ()
     python_manifest_paths: tuple[str, ...] = ()
     npm_manifest_paths: tuple[str, ...] = ()
+    gaps: tuple[DependencyInventoryGap, ...] = ()
+
+    def declarations_complete(self, ecosystem: Ecosystem) -> bool:
+        """Whether absence of a declaration can be established for this ecosystem."""
+        return not any(gap.ecosystem is ecosystem and gap.affects_declarations for gap in self.gaps)
+
+    def lockfiles_complete(self, ecosystem: Ecosystem, directory: str | None = None) -> bool:
+        """Whether an omitted input could contain relevant locked packages."""
+        return not any(
+            gap.ecosystem is ecosystem
+            and gap.affects_lockfiles
+            and (directory is None or _parent_dir(gap.path) == directory)
+            for gap in self.gaps
+        )
+
+    def gap_message(self) -> str | None:
+        """Summarize actual omissions without embedding untrusted file contents."""
+        if not self.gaps:
+            return None
+        counts: dict[str, int] = {}
+        for gap in self.gaps:
+            counts[gap.reason] = counts.get(gap.reason, 0) + 1
+        details = "; ".join(f"{count} {reason}" for reason, count in sorted(counts.items()))
+        return f"Dependency inventory incomplete: {details}."
 
     @property
     def has_python_manifests(self) -> bool:
@@ -302,15 +339,13 @@ def _parse_pyproject(
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
-        # Malformed root pyproject.toml is reported by the structure analyzer.
-        if _parent_dir(path) != "":
-            problems.append(
-                _problem(
-                    DependencyProblemKind.MALFORMED_MANIFEST,
-                    path,
-                    "pyproject.toml is not valid TOML.",
-                )
+        problems.append(
+            _problem(
+                DependencyProblemKind.MALFORMED_MANIFEST,
+                path,
+                "pyproject.toml is not valid TOML.",
             )
+        )
         return declared, problems
 
     project = data.get("project")
@@ -598,8 +633,13 @@ def _parse_package_json(
     declared: list[DeclaredDependency] = []
     data = _safe_json_loads(text)
     if not isinstance(data, dict):
-        # The structure analyzer reports malformed root package.json manifests.
-        return declared, []
+        return declared, [
+            _problem(
+                DependencyProblemKind.MALFORMED_MANIFEST,
+                path,
+                "package.json is not a valid JSON object.",
+            )
+        ]
 
     data_map = cast("dict[str, Any]", data)
     sections = (
@@ -649,7 +689,7 @@ def _npm_package_name(package_path: str) -> str | None:
 
 def _parse_package_lock(
     path: str, text: str, *, ecosystem: Ecosystem = Ecosystem.NPM
-) -> tuple[list[LockedPackage], list[DependencyProblem], bool]:
+) -> tuple[list[LockedPackage], list[DependencyProblem], bool, bool]:
     try:
         data: object = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -665,21 +705,34 @@ def _parse_package_lock(
                 )
             ],
             False,
+            False,
         )
-    except RecursionError:
+    except (RecursionError, ValueError):
         return (
             [],
             [
                 _problem(
                     DependencyProblemKind.MALFORMED_LOCKFILE,
                     path,
-                    f"`{PurePosixPath(path).name}` is too deeply nested to parse safely.",
+                    f"`{PurePosixPath(path).name}` could not be parsed safely.",
                 )
             ],
             False,
+            False,
         )
     if not isinstance(data, dict):
-        return [], [], False
+        return (
+            [],
+            [
+                _problem(
+                    DependencyProblemKind.MALFORMED_LOCKFILE,
+                    path,
+                    f"`{PurePosixPath(path).name}` must contain a JSON object.",
+                )
+            ],
+            False,
+            False,
+        )
 
     data_map = cast("dict[str, Any]", data)
     locked: list[LockedPackage] = []
@@ -696,14 +749,14 @@ def _parse_package_lock(
             if not isinstance(version, str) or not _SAFE_VERSION_RE.match(version):
                 continue
             locked.append(LockedPackage(ecosystem, name, version, path))
-        return locked, [], True
+        return locked, [], True, False
 
     dependencies = data_map.get("dependencies")
     if isinstance(dependencies, dict):
-        _walk_npm_v1_dependencies(dependencies, path, locked, ecosystem, depth=0)
-        return locked, [], True
+        omitted = _walk_npm_v1_dependencies(dependencies, path, locked, ecosystem, depth=0)
+        return locked, [], not omitted, omitted
 
-    return locked, [], False
+    return locked, [], False, False
 
 
 def _walk_npm_v1_dependencies(
@@ -713,9 +766,11 @@ def _walk_npm_v1_dependencies(
     ecosystem: Ecosystem,
     *,
     depth: int,
-) -> None:
+) -> bool:
+    """Collect supported entries and report actual package omissions beyond the depth cap."""
     if depth > _MAX_LOCK_TREE_DEPTH:
-        return
+        return _contains_npm_v1_package(table)
+    omitted = False
     for name, raw in table.items():
         if not isinstance(name, str) or not isinstance(raw, dict):
             continue
@@ -725,7 +780,30 @@ def _walk_npm_v1_dependencies(
             locked.append(LockedPackage(ecosystem, name, version, path))
         nested = entry.get("dependencies")
         if isinstance(nested, dict):
-            _walk_npm_v1_dependencies(nested, path, locked, ecosystem, depth=depth + 1)
+            omitted |= _walk_npm_v1_dependencies(nested, path, locked, ecosystem, depth=depth + 1)
+    return omitted
+
+
+def _contains_npm_v1_package(table: dict[str, Any]) -> bool:
+    """Look past the limit without recursive traversal or collecting additional packages."""
+    pending = [table]
+    while pending:
+        for name, raw in pending.pop().items():
+            if not isinstance(name, str) or not isinstance(raw, dict):
+                continue
+            entry = cast("dict[str, Any]", raw)
+            version = entry.get("version")
+            if (
+                name
+                and len(name) <= 214
+                and isinstance(version, str)
+                and _SAFE_VERSION_RE.match(version)
+            ):
+                return True
+            nested = entry.get("dependencies")
+            if isinstance(nested, dict):
+                pending.append(nested)
+    return False
 
 
 def _split_npm_selector(selector: str) -> tuple[str, str] | None:
@@ -790,19 +868,97 @@ def _parse_yarn_lock(
     return locked, [], True
 
 
+def _pnpm_coordinate(raw_key: str) -> tuple[str, str] | None:
+    """Interpret common pnpm v5/v6/v9 package and snapshot keys without a YAML parser."""
+    key = raw_key.strip()
+    if key.startswith("'") and key.endswith("'"):
+        key = key[1:-1].replace("''", "'")
+    elif key.startswith('"') and key.endswith('"'):
+        try:
+            key = json.loads(key)
+        except (json.JSONDecodeError, RecursionError):
+            return None
+    key = key.lstrip("/")
+    if "(" in key:
+        key, suffix = key.split("(", 1)
+        depth = 1
+        for char in suffix:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif depth == 0:
+                return None
+            if depth < 0:
+                return None
+        if depth:
+            return None
+    parsed = _split_npm_selector(key)
+    if parsed is None and "/" in key:
+        # v5 uses /name/version, including /@scope/name/version.
+        name, version = key.rsplit("/", 1)
+    elif parsed is not None:
+        name, version = parsed
+    else:
+        return None
+    # Older pnpm releases encode peer qualifiers as _peer@version.
+    if "_" in version and "@" in version.split("_", 1)[1]:
+        version = version.split("_", 1)[0]
+    if not _NPM_NAME_RE.match(name.lower()) or not _SAFE_VERSION_RE.match(version):
+        return None
+    return name, version
+
+
 def _parse_pnpm_lock(
     path: str, text: str
-) -> tuple[list[LockedPackage], list[DependencyProblem], bool]:
+) -> tuple[list[LockedPackage], list[DependencyProblem], bool, bool]:
+    """Collect recognizable package keys and flag package entries we cannot interpret.
+
+    The separate consistency flag remains false: this best-effort reader cannot prove
+    manifest/lockfile consistency, even when every visible package key was recognized.
+    """
     locked: list[LockedPackage] = []
+    seen: set[tuple[str, str]] = set()
+    in_packages = False
+    entry_indent: int | None = None
+    omitted = False
     for raw_line in text.splitlines():
-        match = _PNPM_ENTRY_RE.match(raw_line)
-        if match is None:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        name, version = match.group(1), match.group(2)
-        if not _NPM_NAME_RE.match(name.lower()) or not _SAFE_VERSION_RE.match(version):
+        if not raw_line[0].isspace():
+            in_packages = False
+            entry_indent = None
+            section = _PNPM_SECTION_RE.match(raw_line)
+            if section is not None:
+                value = section.group(1).strip()
+                value = "" if value.startswith("#") else value.split(" #", 1)[0].strip()
+                in_packages = not value
+                if value not in ("", "{}", "[]", "null", "~"):
+                    omitted = True
             continue
-        locked.append(LockedPackage(Ecosystem.NPM, name, version, path))
-    return locked, [], False
+        if not in_packages:
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent == 0 or raw_line[indent] == "\t":
+            omitted = True
+            continue
+        if entry_indent is None:
+            entry_indent = indent
+        elif indent < entry_indent:
+            # Inconsistent indentation cannot be interpreted confidently.
+            entry_indent = indent
+            omitted = True
+        if indent != entry_indent:
+            continue
+        match = _PNPM_KEY_RE.match(raw_line[indent:])
+        coordinate = _pnpm_coordinate(match.group(1)) if match is not None else None
+        if coordinate is None:
+            omitted = True
+        elif coordinate not in seen:
+            seen.add(coordinate)
+            locked.append(LockedPackage(Ecosystem.NPM, coordinate[0], coordinate[1], path))
+    return locked, [], False, omitted
 
 
 # --------------------------------------------------------------------------------------
@@ -833,8 +989,22 @@ def _safe_read_text(context: RepositoryContext, path: str) -> str | None:
     """Read a discovered file, returning None if it became unavailable during the scan."""
     try:
         return context.read_text(path)
-    except Exception:  # discovery guarantees are re-validated here
+    except (DiscoveryError, OversizedFileAccessError, SensitiveFileAccessError, OSError):
         return None
+
+
+def _input_kind(name: str) -> tuple[Ecosystem, bool, bool] | None:
+    """Return ecosystem and declaration/lockfile relevance for a supported input."""
+    if name in _PY_MANIFEST_NAMES or _REQUIREMENTS_NAME_RE.match(name):
+        # Python manifests can also provide exact pins for the locked inventory.
+        return Ecosystem.PYPI, True, True
+    if name == "package.json":
+        return Ecosystem.NPM, True, False
+    if name in _PYPROJECT_LOCKFILES:
+        return Ecosystem.PYPI, False, True
+    if name in _NPM_LOCKFILES:
+        return Ecosystem.NPM, False, True
+    return None
 
 
 def build_dependency_inventory(context: RepositoryContext) -> DependencyInventory:
@@ -845,11 +1015,10 @@ def build_dependency_inventory(context: RepositoryContext) -> DependencyInventor
     lockfiles: list[LockfileSummary] = []
     python_manifests: list[str] = []
     npm_manifests: list[str] = []
+    gaps: list[DependencyInventoryGap] = []
 
     parsed = 0
     for item in context.files:
-        if parsed >= _MAX_PARSED_FILES:
-            break
         if item.is_sensitive or item.is_oversized:
             continue
         if context.has_gitignore and context.gitignore.is_ignored(item.path, is_dir=False):
@@ -857,24 +1026,50 @@ def build_dependency_inventory(context: RepositoryContext) -> DependencyInventor
 
         path = item.path
         name = PurePosixPath(path).name
-        is_requirements = bool(_REQUIREMENTS_NAME_RE.match(name))
-        if (
-            name not in _PY_MANIFEST_NAMES
-            and name != "package.json"
-            and not (
-                is_requirements
-                or name in _PYPROJECT_LOCKFILES
-                or name in _NPM_LOCKFILES
-                or name in _UNSUPPORTED_NPM_LOCKFILES
+        # Unsupported formats are reported from their names, without reading binary data
+        # or letting them consume the budget for supported inputs.
+        if name in _UNSUPPORTED_NPM_LOCKFILES:
+            problems.append(
+                _problem(
+                    DependencyProblemKind.UNSUPPORTED_LOCKFILE,
+                    path,
+                    f"`{name}` is not parsed by RepoLens; dependency vulnerability coverage "
+                    "is unavailable for this lockfile format.",
+                )
             )
-        ):
+            continue
+        kind = _input_kind(name)
+        if kind is None:
+            continue
+        ecosystem, affects_declarations, affects_lockfiles = kind
+        is_requirements = bool(_REQUIREMENTS_NAME_RE.match(name))
+        if parsed >= _MAX_PARSED_FILES:
+            gaps.append(
+                DependencyInventoryGap(
+                    path,
+                    ecosystem,
+                    "eligible input(s) omitted after the 80-read limit",
+                    affects_declarations,
+                    affects_lockfiles,
+                )
+            )
             continue
 
         text = _safe_read_text(context, path)
         if text is None:
+            gaps.append(
+                DependencyInventoryGap(
+                    path,
+                    ecosystem,
+                    "eligible input(s) could not be read",
+                    affects_declarations,
+                    affects_lockfiles,
+                )
+            )
             continue
 
         parsed += 1
+        problem_count = len(problems)
 
         if name == "pyproject.toml":
             python_manifests.append(path)
@@ -931,12 +1126,13 @@ def build_dependency_inventory(context: RepositoryContext) -> DependencyInventor
                 )
             )
         elif name in _NPM_LOCKFILES:
+            omitted = False
             if name == "yarn.lock":
                 file_locked, file_problems, complete = _parse_yarn_lock(path, text)
             elif name == "pnpm-lock.yaml":
-                file_locked, file_problems, complete = _parse_pnpm_lock(path, text)
+                file_locked, file_problems, complete, omitted = _parse_pnpm_lock(path, text)
             else:
-                file_locked, file_problems, complete = _parse_package_lock(path, text)
+                file_locked, file_problems, complete, omitted = _parse_package_lock(path, text)
             locked.extend(file_locked)
             problems.extend(file_problems)
             lockfiles.append(
@@ -947,13 +1143,25 @@ def build_dependency_inventory(context: RepositoryContext) -> DependencyInventor
                     package_count=len(file_locked),
                 )
             )
-        elif name in _UNSUPPORTED_NPM_LOCKFILES:
-            problems.append(
-                _problem(
-                    DependencyProblemKind.UNSUPPORTED_LOCKFILE,
+            if omitted:
+                reason = (
+                    "pnpm lockfile(s) with uninterpretable package entries"
+                    if name == "pnpm-lock.yaml"
+                    else "npm lockfile(s) with packages beyond the nesting limit"
+                )
+                gaps.append(DependencyInventoryGap(path, ecosystem, reason, False, True))
+
+        if any(
+            problem.kind is not DependencyProblemKind.UNSUPPORTED_LOCKFILE
+            for problem in problems[problem_count:]
+        ):
+            gaps.append(
+                DependencyInventoryGap(
                     path,
-                    f"`{name}` is not parsed by RepoLens; dependency vulnerability coverage "
-                    "is unavailable for this lockfile format.",
+                    ecosystem,
+                    "dependency input(s) could not be fully parsed",
+                    affects_declarations,
+                    affects_lockfiles,
                 )
             )
 
@@ -964,4 +1172,5 @@ def build_dependency_inventory(context: RepositoryContext) -> DependencyInventor
         lockfiles=tuple(lockfiles),
         python_manifest_paths=tuple(python_manifests),
         npm_manifest_paths=tuple(npm_manifests),
+        gaps=tuple(gaps),
     )

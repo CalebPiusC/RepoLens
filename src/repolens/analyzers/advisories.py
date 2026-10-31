@@ -73,7 +73,8 @@ class OsvVulnerabilityAnalyzer(Analyzer):
         return build_dependency_inventory(context)
 
     def is_applicable(self, context: RepositoryContext) -> bool:
-        return bool(self._inventory(context).unique_packages())
+        inventory = self._inventory(context)
+        return bool(inventory.unique_packages() or inventory.gaps)
 
     def skip_reason(self, context: RepositoryContext, config: ScanConfig) -> str | None:
         if not config.enable_network_checks:
@@ -97,6 +98,8 @@ class OsvVulnerabilityAnalyzer(Analyzer):
         self._message = None
         self._coverage_partial = False
         inventory = self._inventory(context)
+        if message := inventory.gap_message():
+            self._mark_reporting_failure(message)
         available = inventory.unique_packages()
         coordinates = available[: config.max_osv_packages]
         # Packages beyond the query cap are never checked for known vulnerabilities, so a
