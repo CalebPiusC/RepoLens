@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import sysconfig
 from collections.abc import Callable
 from pathlib import Path
 
@@ -23,7 +24,8 @@ _SRC = _REPO_ROOT / "src"
 
 def _cli_argv() -> list[str]:
     """Prefer the installed console script; fall back to ``python -m repolens``."""
-    candidate = Path(sys.executable).with_name("repolens")
+    executable = "repolens.exe" if sys.platform == "win32" else "repolens"
+    candidate = Path(sysconfig.get_path("scripts")) / executable
     if candidate.is_file():
         return [str(candidate)]
     return [sys.executable, "-m", "repolens"]
@@ -41,6 +43,12 @@ def _run(
             [str(_SRC), *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]
         ),
     }
+    # Windows process launchers and temporary directories need these OS variables, even
+    # though the test deliberately does not inherit arbitrary user configuration.
+    if os.name == "nt":
+        for key in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATHEXT"):
+            if key in os.environ:
+                env[key] = os.environ[key]
     if env_extra:
         env.update(env_extra)
     return subprocess.run(  # fixed argv, shell-free, test-controlled

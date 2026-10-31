@@ -1,0 +1,101 @@
+name: Installation
+
+# Run before a PR exists as well as for PRs from forks. A newer push cancels only
+# older runs for the same branch; PR and push runs have separate concurrency keys.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOURCE_DATE_EPOCH: '1735689600'
+  PYTHONUTF8: '1'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_NO_INPUT: '1'
+  REPOLENS_MAIN_URL: https://github.com/CalebPiusC/RepoLens/archive/refs/heads/main.zip
+  REPOLENS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+  REPOLENS_SOURCE_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+  REPOLENS_SOURCE_URL: https://github.com/${{ github.event.pull_request.head.repo.full_name || github.repository }}/archive/${{ github.event.pull_request.head.sha || github.sha }}.zip
+
+jobs:
+  installation:
+    name: Install (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install build and metadata validators
+        run: python -m pip install build twine
+
+      - name: Seed fake local files that must not ship
+        run: python tests/installation/check_artifacts.py seed
+
+      - name: Build sdist and wheel
+        run: python -m build --outdir "${{ runner.temp }}/repolens-dist-a"
+
+      - name: Rebuild independently for byte comparison
+        run: python -m build --outdir "${{ runner.temp }}/repolens-dist-b"
+
+      - name: Build wheel directly from source
+        run: python -m build --wheel --outdir "${{ runner.temp }}/repolens-direct"
+
+      - name: Check distribution metadata with Twine
+        run: python -m twine check --strict "${{ runner.temp }}/repolens-dist-a/*"
+
+      - name: Verify archive contents, versions, metadata and reproducibility
+        run: python tests/installation/check_artifacts.py check "${{ runner.temp }}/repolens-dist-a" "${{ runner.temp }}/repolens-dist-b" "${{ runner.temp }}/repolens-direct"
+
+      - name: Remove fake packaging sentinels
+        run: python tests/installation/check_artifacts.py clean
+
+      - name: Fresh wheel and sdist installs, extras, upgrade and uninstall
+        run: python tests/installation/lifecycle.py wheel --directory "${{ runner.temp }}/repolens-dist-a"
+
+      - name: Git and Git-free source installs, updates, missing Git and uninstall
+        run: python tests/installation/lifecycle.py source --repository "${{ env.REPOLENS_SOURCE_REPO }}" --head "${{ env.REPOLENS_HEAD }}"
+
+      - name: Linux shell activation and documented main archive
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tests/installation/activation.sh
+
+      - name: Windows PowerShell activation and documented main archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
+          & ./tests/installation/activation.ps1
+
+      # Run the existing suite on Windows before a PR is opened. PRs already run it
+      # in ci.yml; keeping this push-only avoids duplicating that PR job.
+      - name: Install non-editable development dependencies for Windows regression tests
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        run: python -m pip install ".[dev]"
+
+      - name: Existing Windows regression suite
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        run: python -m pytest -q

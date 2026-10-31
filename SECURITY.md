@@ -18,5 +18,5 @@ not enabled when this file was added.
 
 ## Supported versions
 
-RepoLens is pre-release (`0.1.0` in development, no tagged releases). Security fixes land on
+RepoLens is pre-release (`0.1.1.dev0` in development, no tagged releases). Security fixes land on
 `main`; there are no maintained release branches yet.

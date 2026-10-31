@@ -4,14 +4,22 @@ All notable changes to RepoLens are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once released.
 
-RepoLens has **no tagged release yet**: the package version is `0.1.0` in development, installable
-only from this repository. Everything below is therefore unreleased — do not add release/tag
+RepoLens has **no tagged release yet**: the current package version is `0.1.1.dev0` in development, installable
+from this repository, not PyPI. Everything below is therefore unreleased — do not add release/tag
 links until a tag actually exists. (The JSON *document* schema is versioned separately as
 `1.1.0`; see ADR-006.)
 
 ## [Unreleased]
 
 ### Added
+
+**Installation reliability (unreleased)**
+
+- A single static development version, reproducible wheel and sdist configuration, distribution
+  metadata, platform-specific installation guidance, and Linux/Windows non-editable install checks.
+- Documented source-pinning, same-version reinstall behavior, optional tools, and uninstall cleanup.
+  No PyPI release or upload is implied.
+
 
 **Stage 1 — foundation, engine, structure analyzer (October 2026)**
 

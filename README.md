@@ -1,7 +1,7 @@
 # RepoLens
 An open-source repository health checker for Python and JavaScript/TypeScript projects.
 
-![RepoLens — See the health of your codebase.](assets/social-preview.png)
+![RepoLens — See the health of your codebase.](https://raw.githubusercontent.com/CalebPiusC/RepoLens/main/assets/social-preview.png)
 
 RepoLens helps developers identify, understand, and fix repository hygiene, configuration, code quality, dependency, and security issues before publishing or deploying a project.
 
@@ -52,74 +52,144 @@ RepoLens itself has no runtime requirement on Ruff, Bandit, Biome, Node.js, or n
 
 ## Installation
 
-RepoLens requires Python `>= 3.11` and `pip`, and is installed directly from GitHub — it is not
-published to PyPI (see [PyPI](#pypi)). Installing into a virtual environment keeps the `repolens`
-command and its dependencies isolated from the rest of your system:
+RepoLens requires Python 3.11 or newer and pip. The current development build is **not
+published to PyPI**; install it from the GitHub source archive below. The archive does not
+require Git, although downloading and installing dependencies requires internet access.
+A virtual environment keeps the command and dependencies separate from other projects.
 
-```bash
-python3 -m venv ~/.venvs/repolens
-source ~/.venvs/repolens/bin/activate          # Windows: ~\.venvs\repolens\Scripts\activate
+### Linux and macOS (sh, bash, or zsh)
 
-pip install "git+https://github.com/CalebPiusC/RepoLens.git"
+```sh
+python3 --version                         # 3.11 or newer
+python3 -m venv "$HOME/.venvs/repolens"
+. "$HOME/.venvs/repolens/bin/activate"
+python -m pip install "https://github.com/CalebPiusC/RepoLens/archive/refs/heads/main.zip"
+python -m pip check
+command -v python
+command -v repolens
+repolens --version
+
+cd /path/to/your/project                  # not the virtual environment or its parent
+repolens scan .
 ```
 
-That installs RepoLens and registers the `repolens` command. No clone or checkout is involved,
-and the installed command can scan any project directory on your machine. The URL installs the
-current default branch, so pin a commit when you need a reproducible setup:
+If `python3` selects an older interpreter, use a specific installed one, for example
+`python3.12 -m venv "$HOME/.venvs/repolens"`. The same shell instructions apply to macOS;
+installation CI currently exercises Linux and Windows, not macOS.
 
-```bash
-pip install "git+https://github.com/CalebPiusC/RepoLens.git@<commit-sha>"
+### Windows (PowerShell)
+
+```powershell
+py -3 --version                           # 3.11 or newer
+py -3 -m venv "$HOME\.venvs\repolens"
+& "$HOME\.venvs\repolens\Scripts\Activate.ps1"
+python -m pip install "https://github.com/CalebPiusC/RepoLens/archive/refs/heads/main.zip"
+python -m pip check
+Get-Command python, repolens | Select-Object -ExpandProperty Source
+repolens --version
+
+Set-Location C:\path\to\your\project   # replace with your actual project path
+repolens scan .
 ```
 
-To add the optional Ruff and Bandit analyzers at the same time, install the `tools` extra:
+The activated environment provides `Scripts\python.exe` and `Scripts\repolens.exe`.
+If `py -3` selects an older Python, install a supported interpreter and select it explicitly,
+for example `py -3.12 -m venv "$HOME\.venvs\repolens"`. If the `py` launcher is absent but
+`python --version` selects a supported interpreter, use `python -m venv` instead. If PowerShell
+blocks `Activate.ps1`, see [Troubleshooting](#the-repolens-command-is-not-recognized) for a
+process-scoped option and a way to run without activation.
 
-```bash
-pip install "repolens[tools] @ git+https://github.com/CalebPiusC/RepoLens.git"
+Both examples install the current `main` archive, which can change. The resulting install is
+**non-editable** and can scan projects outside the RepoLens checkout. `repolens scan .` may exit
+`1` when it finds issues; see [Exit codes](#exit-codes). The CLI can also be invoked with the
+same environment's interpreter as `python -m repolens --version` or
+`python -m repolens scan .`.
+
+### Pinned source and optional tools
+
+For a reproducible source selection, replace `<full-commit-sha>` with an actual full commit SHA:
+
+```sh
+python -m pip install "https://github.com/CalebPiusC/RepoLens/archive/<full-commit-sha>.zip"
 ```
 
-Ruff and Bandit are optional: RepoLens scans without them, reports missing tools as `unavailable`
-analyzers instead of failing, and needs no network access. Biome (JavaScript/TypeScript) is a
-separate npm package. See [Optional external tools](#optional-external-tools).
+This selects an immutable GitHub commit, but does **not** lock transitive dependency versions;
+use your own constraints or lockfile if those must also be reproducible. If you prefer a Git VCS
+URL, install Git and put it on `PATH` first:
 
-### Installing from a clone
-
-Cloning is only necessary when you want the source itself, for example to run the test suite.
-Create and activate the environment first, then install the checkout:
-
-```bash
-git clone https://github.com/CalebPiusC/RepoLens.git
-cd RepoLens
-
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-
-pip install .                      # installs RepoLens and the `repolens` command
+```sh
+python -m pip install "git+https://github.com/CalebPiusC/RepoLens.git@<full-commit-sha>"
 ```
 
-### PyPI
+Ruff and Bandit are optional. To install them with RepoLens, in either shell use:
 
-The `repolens` distribution is not published to PyPI, so `pip install repolens` fails:
-
-```text
-ERROR: Could not find a version that satisfies the requirement repolens (from versions: none)
-ERROR: No matching distribution found for repolens
+```sh
+python -m pip install "repolens[tools] @ https://github.com/CalebPiusC/RepoLens/archive/refs/heads/main.zip"
 ```
 
-Similarly named packages on PyPI are unrelated projects and do not provide this `repolens`
-command. Install from the GitHub URL above instead.
+Without them, RepoLens still scans and reports missing tools as `unavailable`; it does not
+install tools or access the network while scanning unless network checks are explicitly enabled.
+Biome (JavaScript/TypeScript) is a separate npm package. See
+[Optional external tools](#optional-external-tools).
+
+### PyPI (not yet published)
+
+RepoLens is **not published to PyPI**. The intended future command, once the project is actually
+published under this name, is `python -m pip install repolens`; it currently fails with
+`No matching distribution found for repolens`. Do not substitute a similarly named package.
+The current `0.1.1.dev0` is a development version, not a public release.
+
+### Upgrading and uninstalling
+
+After a future PyPI release, the ordinary way to upgrade between distinct published versions is
+`python -m pip install --upgrade repolens`. This is **not available yet**. A pre-release version
+may require pip's `--pre` option. Actual releases must each have a distinct version.
+
+For source installs, an ordinary `--upgrade` can retain an older checkout if both commits declare
+the same package version. To intentionally replace it with the current `main` source, run this
+inside the activated environment:
+
+```sh
+python -m pip install --force-reinstall "https://github.com/CalebPiusC/RepoLens/archive/refs/heads/main.zip"
+```
+
+For a pinned archive or Git VCS URL, replace the URL with the desired new commit. A forced
+reinstall also reinstalls dependencies unless pip is instructed otherwise; use an isolated
+virtual environment. A commit SHA pins source; it does not turn an unchanged development version
+into a new release.
+
+To remove RepoLens from the active environment:
+
+```sh
+python -m pip uninstall repolens
+python -m pip show repolens               # warns/not found and exits nonzero after removal
+```
+
+Pip removes the distribution and its `repolens` launcher, but may leave shared dependencies behind.
+`deactivate` exits the virtual environment. If it was created solely for RepoLens, you can then
+remove the **entire** environment and everything installed in it:
+
+```sh
+rm -rf "$HOME/.venvs/repolens"             # Linux/macOS; double-check this path first
+```
+
+```powershell
+Remove-Item -Recurse -Force "$HOME\.venvs\repolens"  # PowerShell; check the path first
+```
 
 ### Development installation
 
-Contributors install the checkout in editable mode together with the test and lint tooling. This
-is separate from the user installation above; the full setup, including the exact commands CI
-runs, is in the [contributing guide](docs/contributing/README.md).
+To contribute, first activate an environment as above and install a cloned checkout in editable
+mode. Git is needed to clone; use `python -m pip` to target the active interpreter:
 
-```bash
-pip install -e ".[dev]"    # editable install: pytest, pytest-cov, mypy, ruff, bandit
+```sh
+git clone https://github.com/CalebPiusC/RepoLens.git
+cd RepoLens
+python -m pip install -e ".[dev]"
 ```
 
-Every command in this README also works without the console script entry point — as
-`python -m repolens scan .` — provided it runs in the environment where RepoLens is installed.
+The [contributing guide](https://github.com/CalebPiusC/RepoLens/blob/main/docs/contributing/README.md) covers developer checks and the
+[versioning and build policy](https://github.com/CalebPiusC/RepoLens/blob/main/docs/contributing/README.md#versioning-and-distribution-builds).
 
 ## Quick start
 
@@ -161,7 +231,7 @@ A few limits are worth knowing before you trust a clean result:
 
 ```bash
 $ repolens --version
-repolens 0.1.0
+repolens 0.1.1.dev0
 
 $ repolens --help            # top-level help, commands, and exit codes
 $ repolens scan --help       # scan options and examples
@@ -174,8 +244,8 @@ repolens scan .              # scan the current directory
 repolens scan ../my-service  # scan a specific project directory
 ```
 
-Example output (colors omitted), captured from a real run against a small Python project
-with a missing `LICENSE` and a broken README link:
+Example output (colors omitted), captured from an earlier 0.1.0 development run against a
+small Python project with a missing `LICENSE` and a broken README link:
 
 ```text
 RepoLens 0.1.0 · docdemo
@@ -339,9 +409,9 @@ Typical CI usage:
 
 ```bash
 # install RepoLens with the optional Python analyzers (no clone required)
-pip install "repolens[tools] @ git+https://github.com/CalebPiusC/RepoLens.git"
-# in a checkout, the equivalent is: pip install ".[tools]"
-# already have RepoLens? add the tools directly: pip install ruff bandit
+python -m pip install "repolens[tools] @ https://github.com/CalebPiusC/RepoLens/archive/refs/heads/main.zip"
+# in a checkout, the equivalent is: python -m pip install ".[tools]"
+# already have RepoLens? add the tools directly: python -m pip install ruff bandit
 
 repolens scan . --min-severity medium
 ```
@@ -802,9 +872,9 @@ RepoLens never installs tools for you and never installs anything from the scann
 
 ```bash
 # Python lint + security checks: reinstall RepoLens with the `tools` extra
-pip install "repolens[tools] @ git+https://github.com/CalebPiusC/RepoLens.git"
+python -m pip install "repolens[tools] @ https://github.com/CalebPiusC/RepoLens/archive/refs/heads/main.zip"
 # or add the tools to an existing installation:
-pip install bandit ruff
+python -m pip install bandit ruff
 
 # JavaScript/TypeScript lint checks (Node.js required)
 npm install --global @biomejs/biome
@@ -823,7 +893,7 @@ bandit-python-security  unavailable   `bandit` executable was not found on PATH 
 
 ## Supported checks
 
-Every finding carries a stable rule ID, a location, deterministic provenance (`FindingSource`), evidence, explanation, recommendation, and a verification step. Rule IDs prefixed with a tool name preserve that tool's own rule code. The complete per-rule catalog, including severity mappings for external tools, is in the [rules reference](docs/rules/README.md).
+Every finding carries a stable rule ID, a location, deterministic provenance (`FindingSource`), evidence, explanation, recommendation, and a verification step. Rule IDs prefixed with a tool name preserve that tool's own rule code. The complete per-rule catalog, including severity mappings for external tools, is in the [rules reference](https://github.com/CalebPiusC/RepoLens/blob/main/docs/rules/README.md).
 
 | Rule ID | Category | Severity | Check |
 | --- | --- | --- | --- |
@@ -1006,24 +1076,50 @@ Directory-permission tests are skipped on platforms that do not enforce `chmod` 
 
 ### The `repolens` command is not recognized
 
-`repolens` is installed into the environment you installed RepoLens into, so it is only on
-`PATH` while that environment is active. Activate it and retry:
+The command is installed in the environment that ran pip. Activate it and check which
+interpreter and launcher the shell resolves. On Linux/macOS:
 
-```bash
-source ~/.venvs/repolens/bin/activate      # Windows: ~\.venvs\repolens\Scripts\activate
+```sh
+. "$HOME/.venvs/repolens/bin/activate"
+command -v python
+command -v repolens
+python -m pip show repolens
 repolens --version
 ```
 
-Without activation, call that environment's interpreter directly; this works in any shell:
+In PowerShell:
 
-```bash
-~/.venvs/repolens/bin/python -m repolens scan .
-# Windows: ~\.venvs\repolens\Scripts\python.exe -m repolens scan .
+```powershell
+& "$HOME\.venvs\repolens\Scripts\Activate.ps1"
+Get-Command python, repolens | Select-Object -ExpandProperty Source
+python -m pip show repolens
+repolens --version
 ```
 
-If you installed from a clone, the environment is the `.venv` you created there, so activate it
-from that directory. If activation succeeds but the command still fails, confirm which
-environment is actually active with `python -V` and `python -m pip show repolens`.
+The paths should point into that virtual environment (`bin/repolens` on Linux/macOS or
+`Scripts\repolens.exe` on Windows). If PowerShell says running scripts is disabled, and your
+organization permits it, `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`
+enables local activation scripts only for the current PowerShell process; it does not change the
+machine policy. A stricter organizational policy may still block it. Alternatively, do not
+activate: call the environment's Python directly, for example:
+
+```sh
+"$HOME/.venvs/repolens/bin/python" -m repolens scan .
+```
+
+```powershell
+& "$HOME\.venvs\repolens\Scripts\python.exe" -m repolens scan .
+```
+
+Use that same interpreter with `-m pip` to install or inspect the package. If the environment is
+elsewhere (for example `.venv` in a clone), substitute its actual path. If another `repolens`
+appears after uninstalling, it may belong to a different environment on `PATH`.
+
+### Git is not found during installation
+
+A `git+https://...` URL requires a Git executable on `PATH`. Install Git and reopen the shell,
+or use the GitHub `.zip` archive commands above, which do not require Git. Both methods still
+need network access to GitHub and to the configured Python package index for dependencies.
 
 ### Ruff or Bandit is reported as `unavailable` even though it is installed
 
@@ -1043,23 +1139,20 @@ tool never fails a scan and never changes the exit code.
 
 ### Python or pip is not available
 
-`python3 --version` and `python3 -m pip --version` should both succeed. Install Python 3.11 or
-later from [python.org](https://www.python.org/downloads/) or from your system package manager;
-pip ships with it. On Windows the `py` launcher selects an interpreter:
-`py -3.12 -m pip --version`. On Debian/Ubuntu, a minimal installation may need the
-`python3-venv` and `python3-pip` packages before `python3 -m venv` works.
+On Linux/macOS, check `python3 --version` and `python3 -m pip --version`. On Windows,
+check `py -3 --version` and `py -3 -m pip --version`. Install Python 3.11 or newer from
+[python.org](https://www.python.org/downloads/) or your system package manager; pip is generally
+included, but some system distributions package it separately. On Debian/Ubuntu, minimal
+installations may need `python3-venv` and `python3-pip` before creating an environment.
 
 ### Installation fails because of the Python version
 
-RepoLens declares `Requires-Python: >=3.11`, so pip refuses to install it on older interpreters.
-Check the interpreter that created the environment:
-
-```bash
-python3 -V        # must be 3.11 or newer
-```
-
-When the default interpreter is too old, create the environment with an explicit one, for example
-`python3.12 -m venv ~/.venvs/repolens`. CI runs the full suite on Python 3.11, 3.12, and 3.13.
+RepoLens declares `Requires-Python: >=3.11`, so pip refuses older interpreters. Check the
+interpreter used to create the environment (`python3 -V` or `py -3 --version`), select a
+supported one explicitly if needed, then recreate and activate the environment. For example,
+use `python3.12 -m venv "$HOME/.venvs/repolens"` on Linux/macOS or
+`py -3.12 -m venv "$HOME\.venvs\repolens"` in PowerShell. CI tests Python 3.11, 3.12, and
+3.13 on Linux and Windows.
 
 ### The scan reports findings from unrelated code
 
@@ -1097,21 +1190,21 @@ discovery could not read part of the repository — so the result is not a clean
 
 ## Documentation
 
-Additional project documentation lives in [`docs/`](docs/README.md). This README remains the
+Additional project documentation lives in [`docs/`](https://github.com/CalebPiusC/RepoLens/blob/main/docs/README.md). This README remains the
 authoritative reference for CLI behavior, exit codes, and the JSON schema contract; the documents
 below explain design and process without redefining that behavior.
 
 | Document | Description |
 | --- | --- |
-| [Architecture](docs/architecture/README.md) | Scan pipeline, module responsibilities, data flow, and security boundaries |
-| [Architecture Decision Records](docs/adr/README.md) | Why key design choices were made, including the versioned JSON document |
-| [Product Requirements](docs/prd/README.md) | Product scope, target users, and non-functional requirements |
-| [Contributing](docs/contributing/README.md) | Development setup, quality gates, and how to write an analyzer |
-| [Security model](docs/security/README.md) | Threat model, discovery and subprocess safety, and reporting guidance |
-| [Rules reference](docs/rules/README.md) | Every rule ID with category, severity, and trigger |
-| [Changelog](docs/changelog/README.md) | Unreleased changes for the upcoming `0.1.0` |
-| [Test suite](tests/README.md) | Test layout, stub tools, markers, and how to run subsets |
+| [Architecture](https://github.com/CalebPiusC/RepoLens/blob/main/docs/architecture/README.md) | Scan pipeline, module responsibilities, data flow, and security boundaries |
+| [Architecture Decision Records](https://github.com/CalebPiusC/RepoLens/blob/main/docs/adr/README.md) | Why key design choices were made, including the versioned JSON document |
+| [Product Requirements](https://github.com/CalebPiusC/RepoLens/blob/main/docs/prd/README.md) | Product scope, target users, and non-functional requirements |
+| [Contributing](https://github.com/CalebPiusC/RepoLens/blob/main/docs/contributing/README.md) | Development setup, quality gates, and how to write an analyzer |
+| [Security model](https://github.com/CalebPiusC/RepoLens/blob/main/docs/security/README.md) | Threat model, discovery and subprocess safety, and reporting guidance |
+| [Rules reference](https://github.com/CalebPiusC/RepoLens/blob/main/docs/rules/README.md) | Every rule ID with category, severity, and trigger |
+| [Changelog](https://github.com/CalebPiusC/RepoLens/blob/main/docs/changelog/README.md) | Unreleased development changes |
+| [Test suite](https://github.com/CalebPiusC/RepoLens/blob/main/tests/README.md) | Test layout, stub tools, markers, and how to run subsets |
 
 ## License
 
-Released under the [MIT License](LICENSE).
+Released under the [MIT License](https://github.com/CalebPiusC/RepoLens/blob/main/LICENSE).
