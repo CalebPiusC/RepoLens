@@ -269,11 +269,34 @@ def test_npm_flat_lockfiles_do_not_use_tree_depth_budget(tmp_path: Path, version
     assert [(p.name, p.version) for p in inventory.locked] == [("foo", "1.0.0")]
 
 
-def test_deeply_nested_json_remains_a_malformed_lockfile_not_a_crash(tmp_path: Path) -> None:
-    _write(tmp_path, "package-lock.json", '{"nested":' * 1100 + "0" + "}" * 1100)
+def test_deeply_nested_json_does_not_crash_the_scan(tmp_path: Path) -> None:
+    payload = '{"nested":' * 1100 + "0" + "}" * 1100
+    _write(tmp_path, "package-lock.json", payload)
     report = ScanEngine(analyzers=[DependencyAnalyzer()]).scan(tmp_path)
-    assert report.analyzer_outcomes[0].status is AnalyzerStatus.FAILED
-    assert [f.rule_id for f in report.findings] == ["RL-DEP-001"]
+    # CPython's JSON nesting limit differs by version and platform. If it can
+    # parse this object, it contains no dependency entries and is not applicable.
+    if report.analyzer_outcomes[0].status is AnalyzerStatus.FAILED:
+        assert [f.rule_id for f in report.findings] == ["RL-DEP-001"]
+    else:
+        assert report.analyzer_outcomes[0].status is AnalyzerStatus.SKIPPED
+        assert report.findings == []
+
+
+def test_npm_json_recursion_error_is_reported_and_retains_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "package-lock.json", "{}")
+    context = _context(tmp_path)
+
+    def too_deep(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError("unsafe nesting")
+
+    monkeypatch.setattr("repolens.dependencies.json.loads", too_deep)
+    analyzer = DependencyAnalyzer()
+    assert analyzer.is_applicable(context)
+    findings = analyzer.analyze(context, ScanConfig())
+    assert [f.rule_id for f in findings] == ["RL-DEP-001"]
+    assert "could not be fully parsed" in (analyzer.reporting_failure() or "")
 
 
 @pytest.mark.parametrize(
